@@ -1,0 +1,23 @@
+# Gradle / Kotlin
+.gradle/
+.kotlin/
+build/
+local.properties
+
+# Rust
+core/target/
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.fleet/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Never commit vaults or keys used while testing
+*.vault/
+*.kdbx
+*.keyx

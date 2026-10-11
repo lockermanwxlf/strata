@@ -1,0 +1,68 @@
+//! Interface to platform keystores (Windows Hello, Secure Enclave, Android
+//! StrongBox/TEE, TPM, Secret Service).
+//!
+//! Platform keystores never hand out keys; they perform wrap/unwrap with keys
+//! that stay in hardware. A protector therefore only ever sees a per-slot
+//! random *slot secret*. The core derives the slot KEK from that secret and
+//! wraps the vault key itself, so the vault key never crosses the FFI boundary.
+//!
+//! Desktop implementations live in Rust behind `cfg(target_os)`; the Android
+//! implementation is Kotlin (Keystore has no NDK API) and is passed in through
+//! UniFFI's foreign-trait support. Implementations must stay thin: wrap,
+//! unwrap, delete. No format logic or policy belongs in them.
+
+/// What a protector's backing store actually guarantees. The core uses this to
+/// enforce slot policy (see `policy`), so implementations must report honestly:
+/// e.g. Android must check `KeyInfo.securityLevel`, not assume StrongBox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct ProtectorCaps {
+    /// Key material is non-exportable and held in a TPM / Secure Enclave / TEE / StrongBox.
+    pub hardware_backed: bool,
+    /// Hardware enforces attempt limits (TPM anti-hammering, StrongBox, Hello PIN lockout).
+    pub rate_limited: bool,
+    /// Each unwrap requires a biometric or device-credential prompt.
+    pub user_presence: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, uniffi::Error)]
+pub enum ProtectorError {
+    #[error("the user cancelled the prompt")]
+    Cancelled,
+    /// The platform key is gone or was invalidated (e.g. biometric enrollment
+    /// changed). Callers treat this as "slot gone": fall back to the master
+    /// password and offer to re-enroll. It is not a hard error.
+    #[error("the platform key was invalidated")]
+    KeyInvalidated,
+    #[error("protector unavailable: {reason}")]
+    Unavailable { reason: String },
+    #[error("platform error: {detail}")]
+    /// Not `message`: that would clash with `Throwable.message` in the generated Kotlin.
+    Platform { detail: String },
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for ProtectorError {
+    fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        ProtectorError::Platform { detail: e.reason }
+    }
+}
+
+/// A platform keystore adapter. Methods that can show a biometric prompt are
+/// async; UniFFI maps them to Kotlin `suspend` functions.
+///
+/// Implementations must zero `secret` and any returned plaintext buffers they
+/// copy on their side as soon as they are done with them.
+#[uniffi::export(with_foreign)]
+#[async_trait::async_trait]
+pub trait PlatformProtector: Send + Sync {
+    fn capabilities(&self) -> ProtectorCaps;
+
+    /// Encrypt `secret` under the hardware-bound key for `slot_id`, creating
+    /// that key if needed. Returns an opaque blob the core stores locally.
+    async fn wrap(&self, slot_id: String, secret: Vec<u8>) -> Result<Vec<u8>, ProtectorError>;
+
+    /// Reverse of `wrap`. May prompt the user.
+    async fn unwrap(&self, slot_id: String, blob: Vec<u8>) -> Result<Vec<u8>, ProtectorError>;
+
+    /// Destroy the hardware-bound key for `slot_id`.
+    fn delete(&self, slot_id: String) -> Result<(), ProtectorError>;
+}
