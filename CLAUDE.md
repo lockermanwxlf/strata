@@ -14,10 +14,10 @@ Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync
 
 ## Key hierarchy (LUKS / age style)
 
-- **Vault key:** random 256-bit. HKDF derives the encryption and MAC subkeys from it.
-- **Slots:** each slot wraps the vault key under a KEK derived from one protector: password (Argon2id), recovery key, FIDO2 `hmac-secret`/YubiKey, or platform keystore.
-- **Slot scope:** `Synced` slots live in the vault header on the remote. `Local` slots live only on the device and are never uploaded.
-- **Policy** (`policy.rs`, enforced in core, not only in the UI): weak protectors such as PINs and short passwords are never synced. Locally they require a hardware-backed **and** rate-limited keystore.
+- **Vault key:** random 256-bit, one per key epoch. HKDF derives the key ID and the event, snapshot, epoch-chain and local-state keys from it. There is no MAC subkey; AEAD associated data binds all context.
+- **Slots:** each slot wraps the vault key under a KEK derived from one protector: password (Argon2id), FIDO2 `hmac-secret`/YubiKey, or platform keystore. The exception is the 256-bit recovery key, which is an X25519 key pair (HPKE). Rotation can re-wrap to its public key without the user producing the recovery key, and an anchor MAC stops a fabricated vault from opening with it (spec §6.2.1).
+- **Slot scope:** `Synced` slots live in `slots/` on the remote. `Local` slots live only on the device and are never uploaded.
+- **Policy** (`policy.rs`, enforced in core, not only in the UI): PINs (weak protectors) are never synced, and locally they require a hardware-backed **and** rate-limited keystore. Passwords sync whatever their strength (the user's choice), but the UI warns about weak ones and requires confirmation.
 - **Slot-substitution defense:** store a key commitment / key ID, pin it locally on first enrollment, and refuse slots that unwrap to a different key.
 - **Revocation = rotation:** key epochs. New events use the new epoch key, and old epoch keys are stored wrapped under the new one. Removing a slot does not revoke a device that has already unlocked.
 
@@ -40,7 +40,9 @@ A vault is a directory of immutable files. Clients only create new uniquely name
 
 ```
 vault/
-  header                     # vault ID, key ID, synced slots, epoch info
+  strata-vault               # vault ID, format version (written once)
+  epochs/<epoch>-<clientId>.epoch   # key ID, previous epoch key wrapped under this one
+  slots/<slotId>.slot        # synced slots
   events/<clientId>-<seq>.evt
   snapshots/<snapshotId>.snap
 ```
@@ -48,15 +50,15 @@ vault/
 - **Each event:** ID, hybrid logical clock timestamp, causal info (vector clock or parents), and an AEAD payload. The vault ID, event ID and epoch are bound in as associated data.
 - **Merge** is deterministic and order-independent (CRDT-style): per-field registers, tombstones for deletes, sets for tags.
 - **Secret fields don't use LWW.** Concurrent password changes keep both values and surface a conflict to the user.
-- **Compaction:** a snapshot only folds in events every known client has seen. True purge rewrites history and rotates the epoch.
+- **Compaction:** snapshots keep the causal metadata of the ops they retain, so compaction is exact at any time. Event files a snapshot covers are deleted after a grace period. True purge rewrites history and rotates the epoch.
 - **Rollback/fork detection:** each client hash-chains its own events. Every device stores the last-seen seq per client, and a regression raises an alarm.
 - **Size padding:** pad payloads to size buckets.
 - **KDBX is import/export only.** Preserve unknown fields on round trips.
 
 ## Rules for working on crypto
 
-- **Spec first.** `docs/spec.md` (to be written) is the source of truth for byte layouts, KDFs, parameters, and AEAD associated data. Implement against it and never invent constructions.
-- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256 from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
+- **Spec first.** `docs/spec.md` is the source of truth for byte layouts, KDFs, parameters, and AEAD associated data. Implement against it and never invent constructions.
+- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256, HMAC-SHA256, and HPKE (X25519) for recovery slots, from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
 - **Required tests:**
   - property tests that shuffle event order and assert convergence
   - parser fuzzing

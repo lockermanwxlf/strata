@@ -1,10 +1,12 @@
 //! Slot policy: which protectors may be used where.
 //!
-//! Rule: anything stored on the remote must survive offline brute force by
-//! whoever obtains the file. So weak protectors (PINs, short passwords) are
-//! local-only, and even locally they need hardware-enforced rate limiting,
-//! because a PIN-wrapped key in an ordinary file falls to offline guessing
-//! the moment the device is stolen.
+//! Rule: weak protectors (PINs) are local-only, and even locally they need
+//! hardware-enforced rate limiting, because a PIN-wrapped key in an ordinary
+//! file falls to offline guessing the moment the device is stolen.
+//!
+//! Passwords are the user's choice and count as Strong whatever their
+//! entropy. The UI warns about weak ones (docs/spec.md §6.2) but doesn't block
+//! them.
 //!
 //! The UI may pre-filter options with this, but the core must also call it
 //! when creating a slot, so an unsafe combination cannot be produced.
@@ -14,10 +16,9 @@ use crate::protector::ProtectorCaps;
 /// Strength of the secret behind a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum ProtectorStrength {
-    /// High-entropy: long password above the entropy threshold, recovery key,
-    /// FIDO2 hmac-secret, hardware token.
+    /// Password (any strength), recovery key, FIDO2 hmac-secret, hardware token.
     Strong,
-    /// Low-entropy: PIN, short password.
+    /// PIN.
     Weak,
 }
 
