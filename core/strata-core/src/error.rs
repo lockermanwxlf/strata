@@ -31,6 +31,14 @@ pub enum CoreError {
     #[error("the vault is locked")]
     Locked,
 
+    /// No slot opened with the password or recovery key given.
+    #[error("that password or recovery key doesn't unlock this vault")]
+    WrongCredential,
+
+    /// The recovery words couldn't be read. Says which way, so the UI can help.
+    #[error(transparent)]
+    RecoveryWords(#[from] crate::crypto::recovery::WordsError),
+
     #[error(transparent)]
     Policy(#[from] PolicyError),
 

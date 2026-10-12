@@ -16,6 +16,8 @@ pub const LOCAL_MAGIC: &[u8; 4] = b"STLS";
 pub const MAX_PARAMS_LEN: usize = 2048;
 const HEADER_LEN: usize = 47;
 const WRAPPED_LEN: usize = SecretKey::LEN + TAG_LEN;
+/// The largest slot file: maximal params and the larger (recovery) wrap.
+pub const MAX_FILE_LEN: usize = HEADER_LEN + MAX_PARAMS_LEN + ENC_LEN + WRAPPED_LEN;
 const WHAT: &str = "slot";
 
 pub const KIND_PASSWORD: u8 = 1;

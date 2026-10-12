@@ -192,6 +192,20 @@ All pure functions with no I/O.
 
 **Exit:** unlock works and every negative test fails loudly with the right alarm. Then a **review checkpoint: key handling and unlock.**
 
+**Status: done (2026-10-12).**
+
+- **Modules:** `keys/create.rs` (vault creation), `keys/unlock.rs` (spec §6.3 and the recovery path of §6.2.1), `keys/strength.rs` (zxcvbn, input capped at 100 characters), `local/` (local state, `FsLocalStore` and its platform data directories), and the minimal `sync/store.rs` (`RemoteStore` with size-capped reads, plus `MemoryStore`).
+- **Spec changes:** the pin moved to the cleartext unlock record, bound into the state record's associated data, so unlock can check slots before decrypting anything. It advances to the newest verified epoch. Unlock tries at most 8 slots, and only those whose epoch has a record.
+- **Tests:** all the cases listed above pass, plus rotation through the chain, a newer unreachable epoch, tampered local state, an oversized planted file, a decoy epoch record, and update-required.
+- **Review checkpoint:** a high-effort code review found 6 issues and 5 are fixed:
+  - the chain walk now tries every record with a matching key ID
+  - local-state saves fsync the directory on Unix
+  - zxcvbn input is capped
+  - the number of key files is capped
+  - `LocalState::seal` checks the key against the pin
+- **Kept as is:** a folder left by interrupted setup is refused with a clear message rather than cleaned up automatically.
+- **Deferred to Phase 5:** checking epoch-record signatures, which needs the device registry from events (spec §6.4).
+
 ### Phase 4: Data model and merge (M) · spec §8.2–8.3, §9.2–9.3
 
 This phase is pure logic with no crypto, so it can start right after Phase 0, in parallel with Phases 1–3.

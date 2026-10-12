@@ -241,7 +241,7 @@ A vault MUST NOT reuse a recovery key from another vault. Equal `pk` values woul
 XChaCha20-Poly1305 is not key-committing. An attacker who controls storage could craft a slot that opens under the user's KEK to a key the attacker knows (see Len, Grubbs and Ristenpart, "Partitioning Oracle Attacks"). If the client accepted that key, every event it wrote afterward would be readable by the attacker. The defense is the key ID plus pinning.
 
 1. Read `strata-vault`, then parse all epoch records and slot files strictly.
-2. Try the slots of the chosen kind, highest epoch first. Derive `S` and the KEK, then open the slot. An AEAD failure means "try the next slot".
+2. Try the slots of the chosen kind, highest epoch first. Derive `S` and the KEK, then open the slot. An AEAD failure means "try the next slot". Only slots whose epoch has an epoch record are tried, and at most 8 of them, so planted slots can't make unlock arbitrarily slow (each password slot costs a full Argon2 run). Readers also cap every file read at its type's size limit before reading it in.
 3. With the candidate `EK_e`, compute `key_id_e` and find an epoch record for `e` whose `key_id` matches (constant-time). If there is none, reject the slot: the vault is inconsistent or under attack.
 4. **Device with a pin** (local state holds `(e_p, key_id_p)`):
    - `e == e_p`: `key_id_e` MUST equal `key_id_p`.
@@ -250,6 +250,7 @@ XChaCha20-Poly1305 is not key-committing. An attacker who controls storage could
    - If any check fails, raise a **slot-substitution alarm**: refuse to write, and tell the user.
 5. **Device without a pin** (fresh install): pin `(e, key_id_e)`. This is trust-on-first-use. Showing a short `key_id` fingerprint that the user can compare between devices is OPEN-6.
 6. After unlock, the device holds `EK` for the current epoch and, through the chain, every earlier one.
+7. The pin then moves forward to the current epoch and its `key_id`. The chain walk has verified that epoch back to the old pin, and pinning the newest verified epoch means a later rollback to any earlier state is detected.
 
 ### 6.4 Device signing keys
 
@@ -556,6 +557,7 @@ The layout is implementation-defined. Local state is never shared, so it isn't p
 **Unlock record.** Readable before unlock:
 
 - `vault_id` and `client_id`.
+- The pin `(e_p, key_id_p)` (§6.3): the newest epoch this device has verified, and its key ID. It is cleartext because unlock checks slots against it before anything can be decrypted. Key IDs aren't secret, and the pin is bound into the state record's associated data, so changing it breaks the state record.
 - Local slots, each laid out as a §6.2 slot record of kind 4 with magic `"STLS"`. The protector blob comes from `PlatformProtector.wrap(slot_id, S)`. `protector_id` values:
 
   | `protector_id` | Protector |
@@ -566,9 +568,8 @@ The layout is implementation-defined. Local state is never shared, so it isn't p
   | 4 | Linux TPM 2.0 |
   | 5 | Linux Secret Service |
 
-**State record.** XChaCha20-Poly1305 under `local_key_e`, where the record names `e` in cleartext. It holds:
+**State record.** XChaCha20-Poly1305 under `local_key_{e_p}`, with associated data covering the whole unlock record. It holds:
 
-- the pin `(e_p, key_id_p)`
 - the device signing key `dev_sk` (§6.4)
 - `next_seq`
 - the HWM table
