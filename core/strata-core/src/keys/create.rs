@@ -157,6 +157,7 @@ pub fn create_vault(
             next_seq: 2,
             high_water: vec![(client_id, 1, Sha256::digest(&first_event).into())],
             pending: Vec::new(),
+            snapshots: Vec::new(),
         },
     };
     local.save(&vault_id, &state.seal(&keys0)?)?;

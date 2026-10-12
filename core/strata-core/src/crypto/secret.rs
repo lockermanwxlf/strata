@@ -84,6 +84,12 @@ impl Eq for SecretKey {}
 pub struct SecretBytes(Zeroizing<Vec<u8>>);
 
 impl SecretBytes {
+    /// An explicit copy, also zeroized on drop. There's no `Clone`, so every copy
+    /// of a secret is visible where it happens.
+    pub fn duplicate(&self) -> Self {
+        Self::from_slice(self.expose())
+    }
+
     /// Takes ownership of `bytes`. Callers should build the `Vec` at its final size,
     /// because a reallocation would leave an unzeroized copy behind.
     pub fn new(bytes: Vec<u8>) -> Self {

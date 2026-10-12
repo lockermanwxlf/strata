@@ -53,6 +53,9 @@ pub struct StateRecord {
     /// upload, so a failed upload is retried with the same seq instead of leaving
     /// a gap in this device's chain.
     pub pending: Vec<Vec<u8>>,
+    /// Snapshots this device wrote, with when (Unix ms). Garbage collection measures
+    /// its grace period from here, not from file times a sync tool may rewrite.
+    pub snapshots: Vec<(Id, u64)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -184,7 +187,7 @@ type EncResult<W> = core::result::Result<(), encode::Error<<W as Write>::Error>>
 
 impl<C> Encode<C> for StateRecord {
     fn encode<W: Write>(&self, e: &mut Encoder<W>, _: &mut C) -> EncResult<W> {
-        e.map(4)?
+        e.map(5)?
             .u8(1)?
             .bytes(self.device_seed.expose())?
             .u8(2)?
@@ -198,6 +201,10 @@ impl<C> Encode<C> for StateRecord {
         for event in &self.pending {
             e.bytes(event)?;
         }
+        e.u8(5)?.array(self.snapshots.len() as u64)?;
+        for (id, created_ms) in &self.snapshots {
+            e.array(2)?.bytes(id)?.u64(*created_ms)?;
+        }
         Ok(())
     }
 }
@@ -205,7 +212,7 @@ impl<C> Encode<C> for StateRecord {
 impl<'b, C> Decode<'b, C> for StateRecord {
     fn decode(d: &mut Decoder<'b>, _: &mut C) -> core::result::Result<Self, decode::Error> {
         let malformed = || decode::Error::message("malformed state record");
-        if d.map()? != Some(4) || d.u8()? != 1 {
+        if d.map()? != Some(5) || d.u8()? != 1 {
             return Err(malformed());
         }
         let device_seed = SecretKey::from_slice(d.bytes()?).map_err(|_| malformed())?;
@@ -235,11 +242,24 @@ impl<'b, C> Decode<'b, C> for StateRecord {
         for _ in 0..n {
             pending.push(d.bytes()?.to_vec());
         }
+        if d.u8()? != 5 {
+            return Err(malformed());
+        }
+        let n = d.array()?.ok_or_else(malformed)?;
+        let mut snapshots = Vec::new();
+        for _ in 0..n {
+            if d.array()? != Some(2) {
+                return Err(malformed());
+            }
+            let id = d.bytes()?.try_into().map_err(|_| malformed())?;
+            snapshots.push((id, d.u64()?));
+        }
         Ok(StateRecord {
             device_seed,
             next_seq,
             high_water,
             pending,
+            snapshots,
         })
     }
 }
@@ -373,6 +393,7 @@ mod tests {
                 next_seq: 9,
                 high_water: vec![([1; 16], 4, [8; 32]), ([2; 16], 8, [9; 32])],
                 pending: vec![vec![3; 500]],
+                snapshots: vec![([4; 16], 1234)],
             },
         }
     }

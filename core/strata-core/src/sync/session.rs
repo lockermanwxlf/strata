@@ -1,7 +1,8 @@
 //! A sync session (spec §9.1, §9.4): an unlocked vault, its op set, and the rules
 //! for writing events and taking in other devices' events.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -10,16 +11,17 @@ use crate::crypto::random_id;
 use crate::crypto::sign::DeviceKey;
 use crate::error::{AlarmKind, CoreError, Result};
 use crate::format::Id;
-use crate::format::body::{Dot, EventBody, Op, VectorClock};
+use crate::format::body::{Dot, EventBody, Op, RetainedOp, SnapshotBody, VectorClock};
 use crate::format::epoch::EpochRecord;
 use crate::format::event::{self, EventHeader, SealedEvent};
 use crate::format::names::FileName;
+use crate::format::snapshot::{self, SealedSnapshot, SnapshotHeader};
 use crate::keys::Keyring;
 use crate::keys::unlock::Unlocked;
 use crate::local::{LocalState, LocalStore};
-use crate::merge::OpSet;
 use crate::merge::edit::Edit;
 use crate::merge::view::VaultView;
+use crate::merge::{OpRecord, OpSet};
 use crate::model::hlc;
 
 /// Why an event is waiting rather than applied.
@@ -52,6 +54,29 @@ pub struct SyncReport {
     /// This device's local state was older than its own events in the vault (for
     /// example restored from a backup), so it became a new client (spec §9.4).
     pub identity_reset: bool,
+    /// Snapshots loaded this time.
+    pub snapshots_loaded: usize,
+    /// Event files in the store, for deciding when to snapshot (`snapshot_due`).
+    pub event_files: usize,
+    /// Some high-water events are gone, but a snapshot under a key this device
+    /// doesn't hold yet may cover them. Not an alarm, and not silence either: it
+    /// can't be verified until the device unlocks again (it can't write meanwhile).
+    pub integrity_unverified: bool,
+}
+
+/// Snapshot once this many event files have piled up (`Session::snapshot_due`).
+pub const SNAPSHOT_WHEN_EVENT_FILES: usize = 512;
+
+/// A snapshot's watermark: `(client, seq, H(c, seq))` (spec §10.1).
+type Watermark = Vec<(Id, u64, [u8; 32])>;
+
+/// The garbage-collection grace period (spec §10.3, OPEN-9): 30 days.
+pub const GC_GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GarbageReport {
+    pub events_deleted: usize,
+    pub snapshots_deleted: usize,
 }
 
 /// What the user should review (spec §7.2, §9.2): changes the merge kept but that
@@ -68,7 +93,8 @@ struct AppliedEvent {
     hash: [u8; 32],
     hlc: u64,
     clock: VectorClock,
-    epoch: u32,
+    /// `None` for an event compacted into a snapshot: only its hash is known.
+    epoch: Option<u32>,
 }
 
 enum Outcome {
@@ -98,6 +124,12 @@ pub struct Session<'s> {
     alarm: Option<AlarmKind>,
     /// A newer epoch exists than this device holds (spec §7.2).
     rotated_away: bool,
+    /// Loaded snapshots: creator and watermark `(client, seq, hash)`.
+    snapshots: BTreeMap<Id, (Id, Watermark)>,
+    /// A snapshot sealed under an epoch this device doesn't hold exists.
+    unreadable_snapshot: bool,
+    /// Event files at the last sync.
+    event_files: usize,
 }
 
 impl<'s> Session<'s> {
@@ -133,6 +165,9 @@ impl<'s> Session<'s> {
             registry: BTreeMap::new(),
             latest_hlc: 0,
             alarm: None,
+            snapshots: BTreeMap::new(),
+            unreadable_snapshot: false,
+            event_files: 0,
         })
     }
 
@@ -171,7 +206,11 @@ impl<'s> Session<'s> {
             self.rotated_away = true;
         }
         report.key_rotated = self.rotated_away;
-        self.check_stored_high_water(&paths)?;
+        self.event_files = paths.iter().filter(|p| p.starts_with("events/")).count();
+        report.event_files = self.event_files;
+        self.unreadable_snapshot = false;
+        self.load_snapshots(&paths, &mut report)?;
+        self.check_stored_high_water(&paths, &mut report)?;
         // Nothing is uploaded after an alarm (spec §9.4), or while a newer key exists
         // that this device doesn't hold (spec §7.2).
         if self.alarm.is_none() && !self.rotated_away && !self.state.record.pending.is_empty() {
@@ -226,7 +265,9 @@ impl<'s> Session<'s> {
             }
         }
 
-        self.check_high_water()?;
+        if !report.integrity_unverified {
+            self.check_high_water()?;
+        }
         self.check_epoch_signatures(&mut report)?;
         if self.applied.get(&self.state.client_id) >= self.state.record.next_seq {
             self.become_new_client()?;
@@ -317,7 +358,7 @@ impl<'s> Session<'s> {
                 continue;
             };
             let rotated_without_it = records.iter().any(|r| {
-                r.epoch == first.epoch + 1
+                first.epoch.is_some_and(|e| r.epoch == e + 1)
                     && self
                         .keyring
                         .keys(r.epoch)
@@ -414,7 +455,7 @@ impl<'s> Session<'s> {
                 hash: Sha256::digest(bytes).into(),
                 hlc: body.hlc,
                 clock: body.clock.clone(),
-                epoch: header.epoch,
+                epoch: Some(header.epoch),
             },
         );
         self.applied.observe(client, seq);
@@ -427,7 +468,10 @@ impl<'s> Session<'s> {
     /// Spec §9.4, against the store: every high-water event must still be listed,
     /// with the hash this device recorded. Runs on every sync, so a long-running
     /// session notices deleted or replaced files, not just a fresh one.
-    fn check_stored_high_water(&mut self, paths: &[String]) -> Result<()> {
+    ///
+    /// A compacted event is fine if a loaded snapshot's watermark covers it (spec
+    /// §10.2); when the watermark names exactly that seq, its hash must match.
+    fn check_stored_high_water(&mut self, paths: &[String], report: &mut SyncReport) -> Result<()> {
         let marks = self.state.record.high_water.clone();
         for (client, seq, hash) in marks {
             let path = FileName::Event {
@@ -435,30 +479,325 @@ impl<'s> Session<'s> {
                 seq,
             }
             .to_path();
-            if paths.binary_search(&path).is_err() {
-                return Err(self.raise(AlarmKind::Rollback));
+            if paths.binary_search(&path).is_ok() {
+                let bytes = self.store.read(&path, event::MAX_FILE_LEN)?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != hash {
+                    return Err(self.raise(AlarmKind::Fork));
+                }
+                continue;
             }
-            let bytes = self.store.read(&path, event::MAX_FILE_LEN)?;
-            if <[u8; 32]>::from(Sha256::digest(&bytes)) != hash {
-                return Err(self.raise(AlarmKind::Fork));
+            let mut covered = false;
+            // Only snapshots still in the store count. One loaded earlier and deleted
+            // since covers nothing, or deleting the newest snapshot would go unnoticed.
+            let present = self.snapshots.iter().filter(|(id, _)| {
+                paths
+                    .binary_search(&FileName::Snapshot { snapshot_id: **id }.to_path())
+                    .is_ok()
+            });
+            for (_, (_, watermark)) in present {
+                for &(c, s, h) in watermark {
+                    if c == client && s >= seq {
+                        if s == seq && h != hash {
+                            return Err(self.raise(AlarmKind::Fork));
+                        }
+                        covered = true;
+                    }
+                }
+            }
+            if !covered {
+                if self.unreadable_snapshot {
+                    report.integrity_unverified = true;
+                    continue;
+                }
+                return Err(self.raise(AlarmKind::Rollback));
             }
         }
         Ok(())
     }
 
     /// Spec §9.4, against what was applied: an event that is listed but couldn't be
-    /// applied (say its dependencies vanished) is just as missing.
+    /// applied (say its dependencies vanished) is just as missing. A mark below a
+    /// snapshot watermark has no applied event to compare; the store check covered it.
     fn check_high_water(&mut self) -> Result<()> {
         let marks = self.state.record.high_water.clone();
         for (client, seq, hash) in marks {
             if self.applied.get(&client) < seq {
                 return Err(self.raise(AlarmKind::Rollback));
             }
-            if self.events[&(client, seq)].hash != hash {
+            if self
+                .events
+                .get(&(client, seq))
+                .is_some_and(|e| e.hash != hash)
+            {
                 return Err(self.raise(AlarmKind::Fork));
             }
         }
         Ok(())
+    }
+
+    /// Loads every snapshot not yet loaded (spec §10.2).
+    fn load_snapshots(&mut self, paths: &[String], report: &mut SyncReport) -> Result<()> {
+        for path in paths {
+            let Some(name @ FileName::Snapshot { snapshot_id }) = FileName::parse(path) else {
+                continue;
+            };
+            if self.snapshots.contains_key(&snapshot_id) {
+                continue;
+            }
+            let bytes = match self.store.read(path, snapshot::MAX_FILE_LEN) {
+                Ok(bytes) => bytes,
+                Err(e @ CoreError::Rejected { .. }) => {
+                    report.rejected.push((path.clone(), e));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            match self.load_snapshot(&bytes, name)? {
+                Some(e) => report.rejected.push((path.clone(), e)),
+                None => report.snapshots_loaded += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// One snapshot. `Ok(Some(e))` sets it aside; errors are alarms.
+    fn load_snapshot(&mut self, bytes: &[u8], name: FileName) -> Result<Option<CoreError>> {
+        let sealed = match SealedSnapshot::parse(bytes, &self.vault_id)
+            .and_then(|s| name.expect(s.header.file_name()).map(|()| s))
+        {
+            Ok(s) => s,
+            Err(e @ CoreError::UpdateRequired { .. }) => return Err(e),
+            Err(e) => return Ok(Some(e)),
+        };
+        let header = sealed.header;
+        let Some(keys) = self.keyring.keys(header.epoch) else {
+            // A newer epoch this device can't open yet: try again after unlocking.
+            self.unreadable_snapshot = true;
+            return Ok(Some(CoreError::rejected("snapshot", "epoch key not held")));
+        };
+        let body = match sealed.open(&keys.snapshot) {
+            Ok(body) => body,
+            Err(e) => return Ok(Some(e)),
+        };
+
+        // The creator's key: as already known, or else from its own registration,
+        // which reduction never drops (trust on first use, spec §10.2).
+        let own_registration = body.ops.iter().find_map(|r| match &r.op {
+            Op::RegisterDevice {
+                client_id, dev_pk, ..
+            } if *client_id == header.creator => Some(*dev_pk),
+            _ => None,
+        });
+        let Some(creator_pk) = self
+            .registry
+            .get(&header.creator)
+            .copied()
+            .or(own_registration)
+        else {
+            return Ok(Some(CoreError::rejected(
+                "snapshot",
+                "creator isn't registered",
+            )));
+        };
+        if !sealed.signature_valid(&creator_pk) {
+            return Err(self.raise(AlarmKind::Forgery));
+        }
+        for &(client, seq, hash) in &body.watermark {
+            if self
+                .events
+                .get(&(client, seq))
+                .is_some_and(|e| e.hash != hash)
+            {
+                return Err(self.raise(AlarmKind::Fork));
+            }
+        }
+
+        let clocks: Vec<Arc<VectorClock>> = body.clocks.into_iter().map(Arc::new).collect();
+        for retained in body.ops {
+            if let Op::RegisterDevice {
+                client_id, dev_pk, ..
+            } = &retained.op
+            {
+                self.registry.entry(*client_id).or_insert(*dev_pk);
+            }
+            self.latest_hlc = self.latest_hlc.max(retained.hlc);
+            self.ops.insert(OpRecord {
+                dot: retained.dot,
+                hlc: retained.hlc,
+                clock: Arc::clone(&clocks[retained.vc_index as usize]),
+                op: retained.op,
+            });
+        }
+        // Everything up to the watermark now counts as applied; the watermark hash
+        // stands in for the compacted predecessor (spec §9.1).
+        for &(client, seq, hash) in &body.watermark {
+            if self.applied.get(&client) < seq {
+                self.applied.observe(client, seq);
+                self.events.insert(
+                    (client, seq),
+                    AppliedEvent {
+                        hash,
+                        hlc: 0,
+                        clock: VectorClock::default(),
+                        epoch: None,
+                    },
+                );
+            }
+        }
+        self.snapshots
+            .insert(header.snapshot_id, (header.creator, body.watermark));
+        Ok(None)
+    }
+
+    /// Whether it's time for this device to write a snapshot: once the store holds
+    /// `SNAPSHOT_WHEN_EVENT_FILES` event files, so a new device doesn't have to
+    /// replay thousands of them. Only a registered device can sign a usable one.
+    pub fn snapshot_due(&self) -> bool {
+        self.event_files >= SNAPSHOT_WHEN_EVENT_FILES
+            && self.applied.get(&self.state.client_id) > 0
+            && self.alarm.is_none()
+            && !self.rotated_away
+    }
+
+    /// Writes a snapshot of this device's reduced op set (spec §10.3).
+    pub fn write_snapshot(&mut self) -> Result<Id> {
+        if let Some(kind) = self.alarm {
+            return Err(CoreError::Alarm(kind));
+        }
+        if self.rotated_away {
+            return Err(CoreError::KeyRotated);
+        }
+        let client = self.state.client_id;
+        if self.applied.get(&client) == 0 {
+            // Others verify the snapshot with this device's key, so it must be registered.
+            return Err(CoreError::rejected(
+                "snapshot",
+                "this device hasn't written yet",
+            ));
+        }
+        self.ops.reduce();
+        let mut clocks = Vec::new();
+        let mut clock_index: HashMap<*const VectorClock, u32> = HashMap::new();
+        let mut ops = Vec::with_capacity(self.ops.len());
+        for record in self.ops.iter() {
+            let vc_index = *clock_index
+                .entry(Arc::as_ptr(&record.clock))
+                .or_insert_with(|| {
+                    clocks.push(VectorClock::clone(&record.clock));
+                    (clocks.len() - 1) as u32
+                });
+            ops.push(RetainedOp {
+                dot: record.dot,
+                hlc: record.hlc,
+                vc_index,
+                op: record.op.duplicate(),
+            });
+        }
+        let watermark: Vec<_> = self
+            .applied
+            .0
+            .iter()
+            .map(|&(c, s)| (c, s, self.events[&(c, s)].hash))
+            .collect();
+        let snapshot_id = random_id()?;
+        let header = SnapshotHeader {
+            vault_id: self.vault_id,
+            snapshot_id,
+            creator: client,
+            epoch: self.keyring.current(),
+        };
+        let body = SnapshotBody {
+            watermark,
+            clocks,
+            ops,
+        };
+        let bytes = header.seal(
+            &body,
+            &self.keyring.current_keys().snapshot,
+            &self.device,
+            None,
+        )?;
+        self.store.create(&header.file_name().to_path(), &bytes)?;
+        self.state
+            .record
+            .snapshots
+            .push((snapshot_id, hlc::now_ms()));
+        self.snapshots.insert(snapshot_id, (client, body.watermark));
+        self.save()?;
+        Ok(snapshot_id)
+    }
+
+    /// Deletes what this device's own snapshots make redundant, once they have
+    /// existed for `grace_ms` (spec §10.3): the event files under their watermark,
+    /// and this device's older snapshots they dominate. Never acts on another
+    /// device's snapshot.
+    pub fn collect_garbage(&mut self, grace_ms: u64) -> Result<GarbageReport> {
+        if let Some(kind) = self.alarm {
+            return Err(CoreError::Alarm(kind));
+        }
+        let now = hlc::now_ms();
+        let mut report = GarbageReport::default();
+        // Newest first, so that of two snapshots with equal watermarks (each "dominating"
+        // the other) the newer is kept and the older deleted, never both.
+        let mut ripe: Vec<(Id, u64)> = self
+            .state
+            .record
+            .snapshots
+            .iter()
+            .filter(|(id, created)| {
+                now.saturating_sub(*created) >= grace_ms && self.snapshots.contains_key(id)
+            })
+            .copied()
+            .collect();
+        ripe.sort_by_key(|&(_, created)| std::cmp::Reverse(created));
+        let paths = self.store.list()?;
+        for (id, _) in ripe {
+            if !self.state.record.snapshots.iter().any(|(s, _)| *s == id) {
+                continue; // already deleted as dominated by a newer one
+            }
+            let watermark = self.snapshots[&id].1.clone();
+            let covers =
+                |client: &Id, seq: u64| watermark.iter().any(|(c, s, _)| c == client && seq <= *s);
+            for path in &paths {
+                if let Some(FileName::Event { client_id, seq }) = FileName::parse(path)
+                    && covers(&client_id, seq)
+                    && self.delete_if_present(path)?
+                {
+                    report.events_deleted += 1;
+                }
+            }
+            let dominated: Vec<Id> = self
+                .state
+                .record
+                .snapshots
+                .iter()
+                .map(|(other, _)| *other)
+                .filter(|other| {
+                    *other != id
+                        && self
+                            .snapshots
+                            .get(other)
+                            .is_some_and(|(_, w)| w.iter().all(|(c, s, _)| covers(c, *s)))
+                })
+                .collect();
+            for other in dominated {
+                let path = FileName::Snapshot { snapshot_id: other }.to_path();
+                if self.delete_if_present(&path)? {
+                    report.snapshots_deleted += 1;
+                }
+                self.state.record.snapshots.retain(|(s, _)| *s != other);
+            }
+        }
+        self.save()?;
+        Ok(report)
+    }
+
+    fn delete_if_present(&self, path: &str) -> Result<bool> {
+        match self.store.delete(path) {
+            Ok(()) => Ok(true),
+            Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Epoch-record signatures (spec §6.4), checked once the creator is registered.

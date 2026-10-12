@@ -8,5 +8,5 @@ pub mod session;
 pub mod store;
 
 pub use fs_store::FsStore;
-pub use session::{Session, SyncReport};
+pub use session::{GarbageReport, Session, SyncReport};
 pub use store::{MemoryStore, RemoteStore};

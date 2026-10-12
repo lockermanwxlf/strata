@@ -72,6 +72,15 @@ fn event_path(client: Id, seq: u64) -> String {
     .to_path()
 }
 
+/// Cases for property tests that unlock vaults (each unlock runs Argon2): a few by
+/// default, more with PROPTEST_CASES.
+fn slow_cases(default: u32) -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 fn new_vault() -> (MemoryStore, MemoryLocalStore) {
     let store = MemoryStore::new();
     let local = MemoryLocalStore::new();
@@ -219,7 +228,7 @@ fn a_reused_seq_is_a_fork_for_the_writer() {
             hash: a.events[&(a.client_id(), 1)].hash,
             hlc: 0,
             clock: VectorClock::default(),
-            epoch: 0,
+            epoch: Some(0),
         },
     );
     assert_eq!(
@@ -450,7 +459,7 @@ fn step() -> impl Strategy<Value = Step> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(24))]
+    #![proptest_config(ProptestConfig::with_cases(slow_cases(24)))]
 
     /// Three devices writing and syncing at random through one store end up with the
     /// same vault, every event signed, chained and checked on the way.
@@ -723,4 +732,247 @@ fn the_device_name_is_checked_up_front() {
     let (store, local) = new_vault();
     let unlocked = unlock(&store, &local, Credential::Password(PASSWORD)).unwrap();
     assert!(Session::new(&store, &local, unlocked, "").is_err());
+}
+
+// ---- Snapshots and garbage collection (spec §10) ----------------------------------
+
+fn event_count(store: &MemoryStore) -> usize {
+    store.paths_in("events").len()
+}
+
+#[test]
+fn after_compaction_a_fresh_device_still_sees_everything() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    for i in 0..5 {
+        a.write(vec![set(X, "title", &format!("a{i}"))]).unwrap();
+        b.write(vec![set(Y, "title", &format!("b{i}"))]).unwrap();
+    }
+    a.sync().unwrap();
+    b.sync().unwrap();
+    a.write_snapshot().unwrap();
+    let gc = a.collect_garbage(0).unwrap();
+    assert_eq!(event_count(&store), 0, "every event is under A's watermark");
+    assert_eq!(gc.events_deleted, 11);
+
+    // B's running session and a restarted one both accept the compaction.
+    b.sync().unwrap();
+    b.write(vec![set(Y, "notes", "after compaction")]).unwrap();
+    let unlocked = unlock(&store, &b_local, Credential::Password(PASSWORD)).unwrap();
+    let mut b2 = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    assert_eq!(b2.sync().unwrap().snapshots_loaded, 1);
+
+    let c_local = MemoryLocalStore::new();
+    let mut c = open(&store, &c_local, "Tablet");
+    a.sync().unwrap();
+    assert_eq!(contents(&c), contents(&a));
+    assert_eq!(contents(&c), contents(&b2));
+    c.write(vec![set(X, "notes", "new device")]).unwrap();
+    a.sync().unwrap();
+    assert_eq!(field(&a, X, "notes").as_deref(), Some("new device"));
+}
+
+#[test]
+fn only_a_devices_own_snapshots_lead_it_to_delete() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    b.write_snapshot().unwrap();
+    a.sync().unwrap();
+    assert_eq!(a.collect_garbage(0).unwrap(), GarbageReport::default());
+
+    // And within the grace period, not even the creator deletes.
+    a.write(vec![set(X, "title", "a")]).unwrap();
+    a.write_snapshot().unwrap();
+    assert_eq!(
+        a.collect_garbage(30 * 24 * 3600 * 1000).unwrap(),
+        GarbageReport::default()
+    );
+}
+
+#[test]
+fn restoring_an_older_snapshot_is_a_rollback() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.write(vec![set(X, "title", "1")]).unwrap();
+    let first = a.write_snapshot().unwrap();
+    let first_path = FileName::Snapshot { snapshot_id: first }.to_path();
+    let first_bytes = store.get(&first_path).unwrap();
+    a.write(vec![set(X, "title", "2")]).unwrap();
+    a.write_snapshot().unwrap();
+    let gc = a.collect_garbage(0).unwrap();
+    assert_eq!(gc.snapshots_deleted, 1, "the dominated older snapshot goes");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+
+    for path in store.paths_in("snapshots") {
+        store.remove(&path);
+    }
+    store.put(&first_path, first_bytes);
+    let unlocked = unlock(&store, &b_local, Credential::Password(PASSWORD)).unwrap();
+    let mut fresh_b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    assert_eq!(alarm(fresh_b.sync()), AlarmKind::Rollback);
+    assert_eq!(alarm(b.sync()), AlarmKind::Rollback);
+}
+
+#[test]
+fn replaying_a_compacted_event_changes_nothing() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.write(vec![set(X, "title", "1")]).unwrap();
+    let path = event_path(a.client_id(), 2);
+    let event = store.get(&path).unwrap();
+    a.write(vec![set(X, "title", "2")]).unwrap();
+    a.write_snapshot().unwrap();
+    a.collect_garbage(0).unwrap();
+
+    store.put(&path, event);
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    let report = b.sync().unwrap();
+    assert_eq!(report.applied, 0);
+    assert_eq!(field(&b, X, "title").as_deref(), Some("2"));
+}
+
+#[test]
+fn a_snapshot_contradicting_an_applied_event_is_a_fork() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.write(vec![set(X, "title", "1")]).unwrap();
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    // A key holder writes a snapshot whose watermark disagrees about A's event 2.
+    a.events.get_mut(&(a.client_id(), 2)).unwrap().hash = [0xee; 32];
+    a.write_snapshot().unwrap();
+    assert_eq!(alarm(b.sync()), AlarmKind::Fork);
+}
+
+#[test]
+fn a_snapshot_with_a_bad_signature_is_a_forgery() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.write(vec![set(X, "title", "1")]).unwrap();
+    let id = a.write_snapshot().unwrap();
+    let path = FileName::Snapshot { snapshot_id: id }.to_path();
+    let mut bytes = store.get(&path).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    store.put(&path, bytes);
+    let b_local = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &b_local, Credential::Password(PASSWORD)).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    assert_eq!(alarm(b.sync()), AlarmKind::Forgery);
+}
+
+#[derive(Debug, Clone)]
+enum CompactStep {
+    Write {
+        device: usize,
+        entry: usize,
+        value: u8,
+    },
+    Sync {
+        device: usize,
+    },
+    Snapshot {
+        device: usize,
+    },
+    Collect {
+        device: usize,
+    },
+}
+
+fn compact_step() -> impl Strategy<Value = CompactStep> {
+    prop_oneof![
+        4 => (0..3usize, 0..2usize, any::<u8>())
+            .prop_map(|(device, entry, value)| CompactStep::Write { device, entry, value }),
+        3 => (0..3usize).prop_map(|device| CompactStep::Sync { device }),
+        1 => (0..3usize).prop_map(|device| CompactStep::Snapshot { device }),
+        1 => (0..3usize).prop_map(|device| CompactStep::Collect { device }),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(slow_cases(16)))]
+
+    /// Snapshots and garbage collection at random never change the vault: the devices
+    /// converge, and a device joining at the end, from whatever snapshots and events
+    /// are left, sees exactly the same (spec §10).
+    #[test]
+    fn compaction_never_changes_the_vault(steps in proptest::collection::vec(compact_step(), 0..30)) {
+        let (store, a_local) = new_vault();
+        let locals = [a_local, MemoryLocalStore::new(), MemoryLocalStore::new()];
+        let mut devices: Vec<Session<'_>> = ["A", "B", "C"]
+            .iter()
+            .zip(&locals)
+            .map(|(name, local)| open(&store, local, name))
+            .collect();
+        for step in steps {
+            match step {
+                CompactStep::Write { device, entry, value } => {
+                    devices[device].write(vec![Edit::SetField {
+                        entry_id: [entry as u8 + 1; 16],
+                        name: "f".into(),
+                        value: Some(SecretBytes::from_slice(&[value])),
+                        secret: false,
+                    }]).unwrap();
+                }
+                CompactStep::Sync { device } => { devices[device].sync().unwrap(); }
+                CompactStep::Snapshot { device } => {
+                    // A device that has never written can't sign a usable snapshot.
+                    let _ = devices[device].write_snapshot();
+                }
+                CompactStep::Collect { device } => { devices[device].collect_garbage(0).unwrap(); }
+            }
+        }
+        for _ in 0..2 {
+            for device in &mut devices {
+                device.sync().unwrap();
+            }
+        }
+        let first = contents(&devices[0]);
+        for device in &devices[1..] {
+            prop_assert_eq!(&contents(device), &first);
+        }
+        let late_local = MemoryLocalStore::new();
+        let late = open(&store, &late_local, "Late");
+        prop_assert_eq!(&contents(&late), &first);
+    }
+}
+
+#[test]
+fn compaction_under_a_key_not_yet_held_is_unverified_not_an_alarm() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.write(vec![set(X, "title", "1")]).unwrap();
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+
+    // A rotates, catches up, compacts under the new key and collects garbage.
+    rotate_to_epoch_1(&store, &a, b"rotated password");
+    let unlocked = unlock(&store, &a_local, Credential::Password(b"rotated password")).unwrap();
+    let mut a = Session::new(&store, &a_local, unlocked, "Laptop").unwrap();
+    a.sync().unwrap();
+    a.write(vec![set(X, "title", "2")]).unwrap();
+    a.write_snapshot().unwrap();
+    a.collect_garbage(0).unwrap();
+
+    // B can't read the new snapshot yet: its marks can't be checked, but that's
+    // reported, not mistaken for a rollback. B can't write meanwhile.
+    let report = b.sync().unwrap();
+    assert!(report.key_rotated && report.integrity_unverified);
+    assert!(matches!(
+        b.write(vec![set(X, "notes", "x")]),
+        Err(CoreError::KeyRotated)
+    ));
+
+    // Once B unlocks with the new password everything checks out again.
+    let unlocked = unlock(&store, &b_local, Credential::Password(b"rotated password")).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    let report = b.sync().unwrap();
+    assert!(!report.integrity_unverified && !report.key_rotated);
+    assert_eq!(field(&b, X, "title").as_deref(), Some("2"));
 }

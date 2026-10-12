@@ -258,6 +258,7 @@ fn new_client_state(vault_id: Id) -> Result<LocalState> {
             next_seq: 1,
             high_water: Vec::new(),
             pending: Vec::new(),
+            snapshots: Vec::new(),
         },
     })
 }

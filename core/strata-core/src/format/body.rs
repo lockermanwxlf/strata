@@ -100,6 +100,61 @@ pub enum Op {
 }
 
 impl Op {
+    /// An explicit copy (field values are duplicated, see `SecretBytes::duplicate`).
+    pub fn duplicate(&self) -> Op {
+        match self {
+            Op::SetField {
+                entry_id,
+                name,
+                value,
+                secret,
+            } => Op::SetField {
+                entry_id: *entry_id,
+                name: name.clone(),
+                value: value.as_ref().map(SecretBytes::duplicate),
+                secret: *secret,
+            },
+            Op::DeleteEntry { entry_id } => Op::DeleteEntry {
+                entry_id: *entry_id,
+            },
+            Op::KeepEntry { entry_id } => Op::KeepEntry {
+                entry_id: *entry_id,
+            },
+            Op::AddTag { entry_id, tag } => Op::AddTag {
+                entry_id: *entry_id,
+                tag: tag.clone(),
+            },
+            Op::RemoveTag {
+                entry_id,
+                tag,
+                dots,
+            } => Op::RemoveTag {
+                entry_id: *entry_id,
+                tag: tag.clone(),
+                dots: dots.clone(),
+            },
+            Op::RetireClient {
+                client_id,
+                last_seq,
+            } => Op::RetireClient {
+                client_id: *client_id,
+                last_seq: *last_seq,
+            },
+            Op::RegisterDevice {
+                client_id,
+                dev_pk,
+                name,
+            } => Op::RegisterDevice {
+                client_id: *client_id,
+                dev_pk: *dev_pk,
+                name: name.clone(),
+            },
+            Op::SetDeviceName { name } => Op::SetDeviceName { name: name.clone() },
+        }
+    }
+}
+
+impl Op {
     pub const SET_FIELD: u8 = 1;
     pub const DELETE_ENTRY: u8 = 2;
     pub const KEEP_ENTRY: u8 = 3;

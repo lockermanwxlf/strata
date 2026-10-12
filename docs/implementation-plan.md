@@ -306,6 +306,21 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
 
 **Exit:** properties and negative tests pass, and the GC grace period is decided.
 
+**Status: done (2026-10-12), except purge, which moved to Phase 7.**
+
+- **Session API:**
+  - `write_snapshot`: reduces the op set and writes a snapshot with the watermark and a vector-clock table.
+  - `collect_garbage(grace)`: deletes events under this device's own ripe snapshots, and its own dominated snapshots, keeping the newest of equal ones.
+  - `snapshot_due`: true from 512 event files.
+  - `GC_GRACE_MS` is 30 days (OPEN-9).
+- **Loading:** checks the creator's signature (trusting its own registration on first use), checks the watermark against applied events (fork alarm), takes the union, and counts the watermark as applied, with watermark hashes standing in for compacted predecessors.
+- **Spec fixes:**
+  - an older snapshot is not a rollback; rollback is detected through coverage by snapshots still in the store
+  - a device deletes only on the strength of its own snapshots
+  - high-water marks that only an unreadable newer-epoch snapshot could cover are reported as unverified, not raised as an alarm
+- **Bugs caught by tests:** coverage counted snapshots deleted since loading, and two equal snapshots deleted each other.
+- **Tests:** a fresh device after compaction, GC rules and grace, a restored older snapshot (rollback), a replayed compacted event, a contradicting snapshot (fork), a bad snapshot signature (forgery), unverified integrity across a rotation, and a property test with random snapshots and GC whose late joiner must match. The store-level property tests pass at 200 cases.
+
 ### Phase 7: Rotation and slot management (M) · spec §7.2
 
 - **Rotation procedure:**
@@ -316,6 +331,7 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
 - **Other devices:** after a rotation they fall back to the password once, then re-wrap their local slots silently.
 - **Review UX hooks:** list flagged changes by device (`Session::review`), and revert them as ordinary new ops. Automatic revert is OPEN-14.
 - **Concurrent rotations,** per the OPEN-2 decision.
+- **Purge** (moved here from Phase 6, because it needs rotation): write a snapshot without the entry, delete every other file, then rotate (spec §10.4, OPEN-10).
 
 **Tests:**
 

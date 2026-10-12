@@ -488,6 +488,8 @@ Every device keeps a **high-water mark** for each client in its local state: `HW
 - **Replay and relocation.** These are caught by the AAD binding. A copied or renamed file fails AEAD authentication or the name check. A re-uploaded file that a snapshot already covers is ignored.
 - **Forgery.** An AEAD-valid file with a bad device signature (§6.4).
 
+A missing high-water event that a snapshot under an epoch this device doesn't hold yet might cover can't be checked. That is reported as **unverified**, not raised as an alarm. The device can't write in that state anyway (§7.2), and the checks run in full once it unlocks with the newer key.
+
 On an alarm, the device stops writing to the remote, keeps working from its local copy, and shows the user what failed. Recovery is a user decision. Automatic recovery is out of scope for v1.
 
 A device whose local state is lost or restored from a backup MUST become a new client with a fresh `client_id`. Reusing a `client_id` with a rewound seq counter is indistinguishable from a fork. Android backup is already disabled. Writers MUST durably persist `next_seq` before uploading an event.
@@ -527,10 +529,12 @@ Watermark entries are sorted by `client_id`, with no duplicates and no zero seqs
 
 ### 10.2 Loading
 
-1. Decrypt and validate the snapshot as in §9.1, steps 1 to 3: the envelope, decryption, and the creator's signature.
-2. Check its watermark against the HWM (§9.4). A watermark below the HWM for any client is a rollback alarm.
+1. Decrypt and validate the snapshot as in §9.1, steps 1 to 3: the envelope, decryption, and the creator's signature. A device that already knows the creator's key checks against it. Otherwise the key comes from the creator's own `RegisterDevice`, which the snapshot always retains (reduction never drops it), on the same trust-on-first-use basis as §6.3.
+2. For every watermark entry `(c, seq, hash)` whose event this device has applied, the hashes must match; otherwise raise a fork alarm.
 3. Take the union of its retained ops with the device's op set and re-reduce.
-4. Raise the HWM to the watermark.
+4. Count every event up to the watermark as applied. The watermark's hash stands in for a compacted predecessor's file hash (§9.1).
+
+An older snapshot is not a rollback: old snapshots stay until garbage collection, and loading one changes nothing (union is safe). Rollback is detected through coverage (§9.4). A high-water event that is missing must be covered by some snapshot's watermark, and when the watermark names exactly that seq its hash must match.
 
 Because union is safe (§9.3), a device MAY load several snapshots in any order.
 
@@ -538,9 +542,9 @@ Because union is safe (§9.3), a device MAY load several snapshots in any order.
 
 - Any client MAY write a snapshot of its reduced op set.
 - Clients that only read SHOULD write an empty heartbeat event at most once a day after their applied vector clock advances. That keeps watermarks moving and makes it visible which clients are still active.
-- **Garbage collection.**
-  - Event files covered by a snapshot watermark MAY be deleted once that snapshot has existed for 30 days. The grace period is OPEN-9.
-  - A snapshot whose watermark is ≤ another snapshot's MAY be deleted after the same grace period.
+- **Garbage collection.** A device deletes files only on the strength of snapshots it wrote itself. A snapshot from another device is trusted for loading, but a compromised device could write one that silently omits data, and deleting events because of it would destroy the only copies.
+  - Event files covered by the watermark of one of this device's own snapshots MAY be deleted once that snapshot has existed for 30 days. The grace period is OPEN-9.
+  - This device's own snapshots whose watermark is ≤ that snapshot's MAY be deleted at the same time. Other devices' snapshots are left for their creators.
 
 > **Design note.** A snapshot doesn't have to wait until every known client has seen the events it folds in. Snapshots keep the causal metadata of the ops they retain, so merging stays exact with any concurrent event. Compaction is correct at any time. The grace period exists only so that devices in the middle of a sync don't see files disappear.
 
