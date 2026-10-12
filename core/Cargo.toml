@@ -18,9 +18,22 @@ codegen-units = 1
 # Not "symbols": UniFFI reads its metadata from exported symbols in the built library.
 strip = "debuginfo"
 
-# Argon2 at the spec's 64 MiB takes many seconds unoptimized. Optimize it even in
+# Crypto is very slow unoptimized: Argon2 at the spec's 64 MiB takes seconds, and the
+# tamper tests run thousands of Ed25519 verifications. Optimize these crates even in
 # dev and test builds (test inherits dev).
 [profile.dev.package.argon2]
 opt-level = 3
 [profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.ml-kem]
 opt-level = 3

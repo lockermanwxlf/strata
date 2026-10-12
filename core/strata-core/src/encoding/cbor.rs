@@ -6,12 +6,36 @@
 //! bytes. The encoder only ever produces the deterministic form, so a body that
 //! survives a round trip unchanged was deterministic to begin with.
 
+use std::convert::Infallible;
+
+use minicbor::encode::Write;
 use minicbor::{Decode, Encode};
+use zeroize::Zeroizing;
 
 use crate::error::{CoreError, Result};
 
-pub fn encode<T: Encode<()>>(value: &T) -> Vec<u8> {
-    minicbor::to_vec(value).expect("encoding into a Vec cannot fail")
+/// Encodes `value`. Bodies hold secrets, so the output is zeroized on drop, and it is
+/// allocated at its exact final size up front: growing a `Vec` while encoding would
+/// leave unzeroized copies of earlier contents behind.
+pub fn encode<T: Encode<()>>(value: &T) -> Zeroizing<Vec<u8>> {
+    let mut counter = Counter(0);
+    minicbor::encode(value, &mut counter).expect("counting cannot fail");
+    let mut out = Zeroizing::new(Vec::with_capacity(counter.0));
+    minicbor::encode(value, &mut *out).expect("encoding into a Vec cannot fail");
+    debug_assert_eq!(out.len(), counter.0);
+    out
+}
+
+/// A `Write` that only counts bytes.
+struct Counter(usize);
+
+impl Write for Counter {
+    type Error = Infallible;
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+        self.0 += buf.len();
+        Ok(())
+    }
 }
 
 pub fn decode_strict<T>(bytes: &[u8], what: &'static str) -> Result<T>
@@ -20,7 +44,7 @@ where
 {
     let value: T =
         minicbor::decode(bytes).map_err(|_| CoreError::rejected(what, "malformed CBOR"))?;
-    if encode(&value) != bytes {
+    if encode(&value).as_slice() != bytes {
         return Err(CoreError::rejected(
             what,
             "CBOR is not in deterministic form",
@@ -56,7 +80,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let bytes = encode(&sample());
+        let bytes = encode(&sample()).to_vec();
         // {1: 500, 2: h'010203', 3: ["a"]}
         assert_eq!(
             bytes,

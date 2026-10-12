@@ -95,7 +95,7 @@ There are two layers.
 | Ops per event | 4096 |
 | Entries per vector clock | 4096 |
 | Field value | 64 KiB |
-| Field name or tag | 1..=128 bytes of UTF-8, NFC |
+| Field name, tag or device name | 1..=128 bytes of UTF-8, NFC |
 
 ## 5. Vault layout
 
@@ -189,7 +189,7 @@ The maximums stop a malicious slot from exhausting memory or CPU. The minimums e
 [45..47)    LE16 params_len
 [47..47+P)  params
 [47+P..)    wrap, depending on kind:
-              kinds 1, 3:  nonce[24] || XChaCha20-Poly1305 ciphertext of EK_epoch [48]
+              kinds 1, 3 (4):  nonce[24] || XChaCha20-Poly1305 ciphertext of EK_epoch [48]
                            AAD = [0..71+P), i.e. everything before the ciphertext
               kind 2:      enc[1120] || HPKE ciphertext of EK_epoch [48]   (§6.2.1)
                            HPKE aad = [0..47+P); HPKE itself binds enc
@@ -306,7 +306,7 @@ File name: `epochs/<epoch:08x>-<creator clientId>.epoch`. `C` below is `cutover_
 
 - **Epoch 0** has `cutover_count = 0` and no chain wrap. It is protected by the `key_id` check in §6.3 and by its creator's signature.
 - **Epoch > 0:** the chain wrap authenticates the whole record under `EK_epoch`, and the signature attributes it to its creator.
-- **The cutover vector** is the creator's applied vector clock at rotation. It records which devices were known when the rotation happened (§7.2).
+- **The cutover vector** is the creator's applied vector clock at rotation. It records which devices were known when the rotation happened (§7.2). Its entries follow the vector-clock rules in §8.2: sorted by `client_id`, no duplicates, no zero seqs, and at most 4096.
 
 ### 7.2 Rotation
 
@@ -517,6 +517,8 @@ SnapshotBody = {
 }
 RetainedOp = [client_id bstr16, seq uint, op_index uint, hlc uint, vc_index uint, Op]
 ```
+
+Watermark entries are sorted by `client_id`, with no duplicates and no zero seqs. Every `vc_index` must point into the vector-clock table. Every vector clock and op follows the rules in §8.2.
 
 ### 10.2 Loading
 

@@ -63,7 +63,8 @@ jobs:
       - working-directory: core
         run: |
           for target in $(cargo fuzz list); do
-            cargo fuzz run "$target" -- -max_total_time=60
+            mkdir -p "fuzz/corpus/$target"
+            cargo fuzz run "$target" "fuzz/corpus/$target" "fuzz/seeds/$target" -- -max_total_time=60
           done
 
   desktop:

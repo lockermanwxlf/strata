@@ -2,6 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #   "argon2-cffi==25.1.0",
+#   "cbor2==6.1.5",
 #   "cryptography==50.0.2",
 #   "kyber-py==1.2.0",
 #   "mnemonic==0.21",
@@ -18,6 +19,7 @@ with the Rust crates:
   - Argon2id: argon2-cffi (the reference C implementation)
   - XChaCha20-Poly1305 and Ed25519: PyNaCl (libsodium)
   - BIP39: mnemonic (Trezor's reference implementation)
+  - CBOR: cbor2, in canonical mode
   - ML-KEM-768 and X25519: cryptography (OpenSSL), plus kyber-py for the
     deterministic encapsulation OpenSSL doesn't expose
   - X-Wing and HPKE: written out below from draft-connolly-cfrg-xwing-kem-10,
@@ -40,6 +42,7 @@ import unicodedata
 from pathlib import Path
 
 import argon2.low_level
+import cbor2
 import nacl.bindings
 import nacl.signing
 from cryptography.hazmat.primitives.asymmetric import mlkem, x25519
@@ -282,6 +285,150 @@ def check_recovery():
     expect("recovery anchor", hmac.new(anchor_key, msg, hashlib.sha256).digest(), h(a["tag"]))
 
 
+# ---- Complete files (spec §5–§10), rebuilt from the spec text ----------------
+
+
+def le16(n):
+    return struct.pack("<H", n)
+
+
+def le32(n):
+    return struct.pack("<I", n)
+
+
+def le64(n):
+    return struct.pack("<Q", n)
+
+
+def preamble(magic):  # magic || LE16 format_version || LE16 flags
+    return magic + le16(1) + le16(0)
+
+
+def derive_epoch_keys(vault_id, ek):  # spec §6.1
+    labels = ["key-id", "event-key", "snapshot-key", "epoch-chain-key", "local-state-key"]
+    return {label: hkdf(vault_id, ek, b"strata v1 " + label.encode()) for label in labels}
+
+
+def xchacha(key, nonce, plaintext, aad):
+    return nacl.bindings.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, aad, nonce, key)
+
+
+def device_sign(seed, signed_bytes):  # spec §6.4
+    return nacl.signing.SigningKey(seed).sign(b"strata v1 signature" + signed_bytes).signature
+
+
+def pad(body):  # spec §4
+    total = padme(max(4 + len(body), 256))
+    return le32(len(body)) + body + bytes(total - 4 - len(body))
+
+
+def op_cbor(o):  # spec §8.2: flat arrays, op type first
+    t = o["type"]
+    if t == "SetField":
+        value = None if o["value"] is None else h(o["value"])
+        return [1, h(o["entry_id"]), o["name"], value, o["secret"]]
+    if t == "DeleteEntry":
+        return [2, h(o["entry_id"])]
+    if t == "KeepEntry":
+        return [3, h(o["entry_id"])]
+    if t == "AddTag":
+        return [4, h(o["entry_id"]), o["tag"]]
+    if t == "RemoveTag":
+        return [5, h(o["entry_id"]), o["tag"], [[h(c), s, i] for c, s, i in o["dots"]]]
+    if t == "RetireClient":
+        return [6, h(o["client_id"]), o["last_seq"]]
+    if t == "RegisterDevice":
+        return [7, h(o["client_id"]), h(o["dev_pk"]), o["name"]]
+    if t == "SetDeviceName":
+        return [8, o["name"]]
+    raise ValueError(t)
+
+
+def clock_cbor(clock):
+    return [[h(c), s] for c, s in clock]
+
+
+def check_files():
+    v = load("files.json")
+    vid = h(v["vault_id"])
+    eks = [h(e) for e in v["epoch_keys"]]
+    keys = [derive_epoch_keys(vid, e) for e in eks]
+    seed = h(v["device"]["seed"])
+
+    expect("strata-vault", preamble(b"STVT") + vid, h(v["vault_info"]["file"]))
+
+    for s in v["slots"]:  # spec §6.2
+        kind, slot_id, epoch = s["kind"], h(s["slot_id"]), s["epoch"]
+        if kind == 1:
+            password = unicodedata.normalize("NFC", h(s["password_utf8"]).decode())
+            secret = argon2.low_level.hash_secret_raw(
+                secret=password.encode(), salt=h(s["salt"]), time_cost=s["t"],
+                memory_cost=s["m_kib"], parallelism=s["p"], hash_len=32,
+                type=argon2.low_level.Type.ID, version=19,
+            )
+            params = le32(s["m_kib"]) + le32(s["t"]) + le32(s["p"]) + h(s["salt"])
+        elif kind == 2:
+            r = h(s["recovery_key"])
+            _, pk = derive_keypair(r)
+            anchor_key = hkdf(vid, r, b"strata v1 recovery-anchor-key")
+            anchor_epoch = s["anchor_epoch"]
+            msg = b"strata v1 recovery-anchor" + vid + le32(anchor_epoch) + keys[anchor_epoch]["key-id"] + pk
+            tag = hmac.new(anchor_key, msg, hashlib.sha256).digest()
+            params = pk + le32(anchor_epoch) + tag
+        elif kind == 3:
+            secret, cred = h(s["slot_secret"]), h(s["credential_id"])
+            params = h(s["salt"]) + le16(len(cred)) + cred
+        else:
+            secret, blob = h(s["slot_secret"]), h(s["blob"])
+            params = bytes([s["protector_id"]]) + le16(len(blob)) + blob
+        magic = b"STLS" if kind == 4 else b"STSL"
+        header = preamble(magic) + vid + slot_id + le32(epoch) + bytes([kind]) + le16(len(params)) + params
+        if kind == 2:
+            enc, ct = seal_base_derand(pk, b"strata v1 recovery-slot", header, eks[epoch], h(s["encap_randomness"]))
+            file = header + enc + ct
+        else:
+            kek = hkdf(vid + slot_id, secret, b"strata v1 slot-kek")
+            nonce = h(s["nonce"])
+            file = header + nonce + xchacha(kek, nonce, eks[epoch], header + nonce)
+        expect(f"slot kind {kind}", file, h(s["file"]))
+
+    for e in v["epochs"]:  # spec §7.1
+        epoch = e["epoch"]
+        record = preamble(b"STEP") + vid + le32(epoch) + h(e["creator"]) + keys[epoch]["key-id"]
+        record += le16(len(e["cutover"])) + b"".join(h(c) + le64(s) for c, s in e["cutover"])
+        if epoch > 0:
+            nonce = h(e["chain_nonce"])
+            record += nonce
+            record += xchacha(keys[epoch]["epoch-chain-key"], nonce, eks[epoch - 1], record)
+        expect(f"epoch {epoch} record", record + device_sign(seed, record), h(e["file"]))
+
+    ev = v["event"]  # spec §8
+    b = ev["body"]
+    body = cbor2.dumps(
+        {1: b["hlc"], 2: clock_cbor(b["clock"]), 3: h(b["prev_hash"]), 4: [op_cbor(o) for o in b["ops"]]},
+        canonical=True,
+    )
+    nonce = h(ev["nonce"])
+    header = preamble(b"STEV") + vid + h(ev["client_id"]) + le64(ev["seq"]) + le32(ev["epoch"]) + nonce
+    signed = header + xchacha(keys[ev["epoch"]]["event-key"], nonce, pad(body), header)
+    expect("event file", signed + device_sign(seed, signed), h(ev["file"]))
+
+    sn = v["snapshot"]  # spec §10
+    b = sn["body"]
+    body = cbor2.dumps(
+        {
+            1: [[h(c), s, h(hash_)] for c, s, hash_ in b["watermark"]],
+            2: [clock_cbor(c) for c in b["clocks"]],
+            3: [[h(o["client_id"]), o["seq"], o["op_index"], o["hlc"], o["vc_index"], op_cbor(o["op"])] for o in b["ops"]],
+        },
+        canonical=True,
+    )
+    nonce = h(sn["nonce"])
+    header = preamble(b"STSN") + vid + h(sn["snapshot_id"]) + h(sn["creator"]) + le32(sn["epoch"]) + nonce
+    signed = header + xchacha(keys[sn["epoch"]]["snapshot-key"], nonce, pad(body), header)
+    expect("snapshot file", signed + device_sign(seed, signed), h(sn["file"]))
+
+
 if __name__ == "__main__":
     check_ietf_hpke_vector()
     check_kdf()
@@ -290,4 +437,5 @@ if __name__ == "__main__":
     check_padding()
     check_ed25519()
     check_recovery()
+    check_files()
     print(f"OK: {checks} checks passed")

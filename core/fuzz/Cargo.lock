@@ -971,7 +971,6 @@ name = "strata-core-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
- "minicbor",
  "strata-core",
 ]
 

@@ -158,6 +158,14 @@ All pure functions with no I/O.
 
 **Exit:** the vectors and negative tests pass, and each fuzz target runs for 10 minutes without crashing. **Formats are frozen** for v1 from here on; changing them means updating the spec and the vectors.
 
+**Status: done (2026-10-11).**
+
+- **Modules:** `format/` has `body`, `names`, `vault_info`, `slot`, `epoch`, `event` and `snapshot`. Every parser enforces its size limit before allocating, and a newer `format_version` yields `UpdateRequired`.
+- **Tamper tests:** a bit flip at every offset of a slot, epoch record, event and snapshot is caught. Renamed files, wrong vault IDs, non-canonical CBOR, nonzero padding, and well-formed bodies that break a rule are all rejected.
+- **Vectors:** `files.json` has a vector for every file type. `check.py` rebuilds each one byte for byte from the spec (60 checks in total).
+- **Fuzz targets:** `reader`, `padding`, `envelopes`, `bodies` and `names`.
+- **Fuzzing:** each target ran 10 minutes in WSL under AddressSanitizer, starting from seeds generated from the vectors (`core/fuzz/seeds`). About 1.5 billion executions, no crashes. Windows can't link the fuzz targets, so use `core/tools/fuzz/run-wsl.sh` or CI.
+
 ### Phase 3: Keys, slots, unlock and local state (M) · spec §6.2–6.3, §7.1, §11
 
 - **Vault creation:**

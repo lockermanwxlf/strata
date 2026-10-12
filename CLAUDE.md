@@ -76,9 +76,11 @@ vault/
 - `cd core && cargo test && cargo clippy`: Rust tests and lints
 - `uv run core/tools/vectors/check.py`: recompute the test vectors with independent (non-Rust) implementations
 - `cd core && STRATA_WRITE_VECTORS=1 cargo test --test vectors`: regenerate vectors after a deliberate spec change; then run the check above
+- `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/run-wsl.sh 600`: fuzz every parser for 10 minutes in WSL, starting from `core/fuzz/seeds` (regenerate with `uv run core/tools/fuzz/make_seeds.py`). Fuzzing is Linux or CI only; see Gotchas
 
 ## Gotchas
 
 - **Don't strip symbols from the release profile.** UniFFI reads its metadata from the library's exported symbols (`strip = "debuginfo"` only).
+- **Fuzzing doesn't link on Windows.** strata-core is also a cdylib, and Windows DLLs can't leave libFuzzer's coverage hooks unresolved. Fuzz in CI or WSL instead.
 - **Library naming:** JNA loads the desktop library from the classpath at `<jna-prefix>/` (e.g. `win32-x86-64/strata_core.dll`). `bundleHostNative` puts it there.
 - **Windows:** dev environment is Windows with the repo on a Dev Drive (`D:\src\strata`); `CARGO_HOME`, `RUSTUP_HOME` and `GRADLE_USER_HOME` point to `D:\packages`.
