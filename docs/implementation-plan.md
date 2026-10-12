@@ -228,6 +228,21 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
 
 **Exit:** the property tests pass with at least 10,000 cases each, and the fixtures are frozen.
 
+**Status: done (2026-10-12).**
+
+- **Modules:**
+  - `model/hlc.rs`: HLC generation, counter carry, far-future check
+  - `model/clock.rs`: vector-clock `observe`, `merge` and `covers`
+  - `merge/mod.rs`: `OpSet` with idempotent `apply_event`, `union`, happened-before, and §9.3 reduction in one pass
+  - `merge/view.rs`: the materialized view, borrowing secret values from the op set
+  - `merge/edit.rs`: `Edit` turned into ops. `RemoveTag` lists the adds it observed, and `password`/`otp` are always secret.
+- **Spec changes:** a "conflict" in which every candidate is null is no conflict, and the field is absent. A `RemoveTag` drops an add only for the same `(x, t)`.
+- **Tests:**
+  - One scenario per §9.2 rule, each also checked under reduction.
+  - Two property tests: three simulated devices edit, sync and reduce at random, and the shuffled full log must match. Reduced overlapping parts, unioned, must match the whole. Both pass at 10,000 cases (8 s), and a deliberately injected reduction bug makes both fail.
+  - Views are compared with their secret values included, not just through `Debug`, which redacts them.
+- **Vector:** `merge.json` covers events from 3 devices across 4 entries. The frozen view matches a hand derivation, and `check.py` recomputes it with an independent Python implementation of §9.2 (61 checks in total).
+
 ### Phase 5: Event log and sync engine (L) · spec §5, §6.4, §7.2 (old-epoch events), §9.1, §9.4
 
 - **`RemoteStore` trait:** `list`, `read`, `create_exclusive`, `delete`.

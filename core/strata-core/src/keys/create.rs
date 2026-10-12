@@ -16,6 +16,7 @@ use crate::format::names::FileName;
 use crate::format::slot::{self, SlotParams};
 use crate::format::vault_info::VaultInfo;
 use crate::local::{LocalState, LocalStore, Pin, StateRecord};
+use crate::model::hlc;
 use crate::policy::{ProtectorStrength, SlotScope, check_slot_policy};
 use crate::sync::RemoteStore;
 
@@ -100,7 +101,7 @@ pub fn create_vault(
     };
     let first_event = first_event_header.seal(
         &EventBody {
-            hlc: physical_hlc_now(),
+            hlc: hlc::next(0, hlc::now_ms())?,
             clock: VectorClock(vec![(client_id, 1)]),
             prev_hash: [0; 32],
             ops: vec![Op::RegisterDevice {
@@ -164,13 +165,4 @@ pub fn create_vault(
         client_id,
         recovery_words: recovery::to_words(&r),
     })
-}
-
-/// The HLC for a device's first event: wall-clock milliseconds, counter 0 (spec §8.3).
-/// The full clock, which also tracks applied events, comes with the data model.
-fn physical_hlc_now() -> u64 {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    (ms & ((1 << 48) - 1)) << 16
 }

@@ -22,6 +22,8 @@ use strata_core::format::event::EventHeader;
 use strata_core::format::slot::{self, SlotParams};
 use strata_core::format::snapshot::SnapshotHeader;
 use strata_core::format::vault_info::VaultInfo;
+use strata_core::merge::OpSet;
+use strata_core::merge::view::{Field, VaultView};
 use strata_core::policy::SlotScope;
 
 /// Bytes `start, start+1, …` (wrapping), so inputs are obviously synthetic.
@@ -593,4 +595,208 @@ fn ed25519() {
 #[test]
 fn files() {
     check("files.json", file_vectors());
+}
+
+// ---- Merge fixture (spec §14.1 item 5) ----------------------------------------
+
+fn view_json(view: &VaultView<'_>) -> Value {
+    let dot = |d: &Dot| json!([h(d.client_id), d.seq, d.op_index]);
+    let entries: serde_json::Map<String, Value> = view
+        .entries
+        .iter()
+        .map(|(id, e)| {
+            let fields: serde_json::Map<String, Value> = e
+                .fields
+                .iter()
+                .map(|(name, f)| {
+                    let v = match f {
+                        Field::Value {
+                            value,
+                            secret,
+                            dot: d,
+                        } => {
+                            json!({"secret": secret, "value": h(value.expose()), "dot": dot(d)})
+                        }
+                        Field::Conflict { candidates } => json!({"conflict": candidates
+                            .iter()
+                            .map(|c| json!([c.value.map(|v| h(v.expose())), dot(&c.dot)]))
+                            .collect::<Vec<_>>()}),
+                    };
+                    (name.to_string(), v)
+                })
+                .collect();
+            let v = json!({
+                "deleted": e.deleted,
+                "unanswered_delete": e.unanswered_delete,
+                "tags": e.tags.iter().collect::<Vec<_>>(),
+                "fields": fields,
+            });
+            (h(id), v)
+        })
+        .collect();
+    let devices: serde_json::Map<String, Value> = view
+        .devices
+        .iter()
+        .map(|(id, d)| {
+            let v =
+                json!({"dev_pk": h(d.dev_pk), "name": d.name, "retired_after": d.retired_after});
+            (h(id), v)
+        })
+        .collect();
+    json!({ "entries": entries, "devices": devices })
+}
+
+fn merge_vectors() -> Value {
+    let (a, b, c) = (arr::<16>(0xa0), arr::<16>(0xb0), arr::<16>(0xc0));
+    let (x, y, v, z) = (
+        arr::<16>(0x10),
+        arr::<16>(0x20),
+        arr::<16>(0x30),
+        arr::<16>(0x40),
+    );
+    let set = |entry: [u8; 16], name: &str, value: &str, secret: bool| Op::SetField {
+        entry_id: entry,
+        name: name.into(),
+        value: Some(SecretBytes::from_slice(value.as_bytes())),
+        secret,
+    };
+    let register = |client: [u8; 16], name: &str| Op::RegisterDevice {
+        client_id: client,
+        dev_pk: [client[0]; 32],
+        name: name.into(),
+    };
+    // (client, seq, hlc, clock, ops). Comments say what each event saw.
+    let events = || {
+        vec![
+            (
+                a,
+                1,
+                1,
+                vec![(a, 1)],
+                vec![
+                    register(a, "Laptop"),
+                    set(x, "title", "Bank", false),
+                    set(x, "password", "p0", true),
+                    Op::AddTag {
+                        entry_id: x,
+                        tag: "finance".into(),
+                    },
+                    set(y, "title", "Mail", false),
+                    set(v, "title", "Vault", false),
+                ],
+            ),
+            // B saw only A1.
+            (
+                b,
+                1,
+                2,
+                vec![(a, 1), (b, 1)],
+                vec![
+                    register(b, "Phone"),
+                    set(x, "password", "from B", true),
+                    Op::RemoveTag {
+                        entry_id: x,
+                        tag: "finance".into(),
+                        dots: vec![Dot {
+                            client_id: a,
+                            seq: 1,
+                            op_index: 3,
+                        }],
+                    },
+                    Op::DeleteEntry { entry_id: y },
+                    Op::DeleteEntry { entry_id: v },
+                ],
+            ),
+            // A, concurrently with B1.
+            (
+                a,
+                2,
+                3,
+                vec![(a, 2)],
+                vec![
+                    set(x, "password", "from A", true),
+                    Op::AddTag {
+                        entry_id: x,
+                        tag: "finance".into(),
+                    },
+                    set(y, "notes", "n", false),
+                    set(v, "notes", "n2", false),
+                    Op::SetDeviceName {
+                        name: "Work laptop".into(),
+                    },
+                ],
+            ),
+            // C saw A2 and B1.
+            (
+                c,
+                1,
+                4,
+                vec![(a, 2), (b, 1), (c, 1)],
+                vec![
+                    register(c, "Tablet"),
+                    set(x, "title", "Bank (C)", false),
+                    Op::RetireClient {
+                        client_id: b,
+                        last_seq: 1,
+                    },
+                    Op::KeepEntry { entry_id: v },
+                    set(z, "title", "Old", false),
+                ],
+            ),
+            (
+                c,
+                2,
+                5,
+                vec![(a, 2), (b, 1), (c, 2)],
+                vec![Op::DeleteEntry { entry_id: z }],
+            ),
+            // B again, still having seen only A1.
+            (
+                b,
+                2,
+                6,
+                vec![(a, 1), (b, 2)],
+                vec![set(x, "title", "Bank (B)", false)],
+            ),
+        ]
+    };
+
+    let build = || {
+        let mut ops = OpSet::new();
+        for (client, seq, hlc, clock, body_ops) in events() {
+            let body = EventBody {
+                hlc,
+                clock: VectorClock(clock),
+                prev_hash: [0; 32],
+                ops: body_ops,
+            };
+            body.validate(&client, seq).unwrap();
+            ops.apply_event(client, seq, body);
+        }
+        ops
+    };
+    let full = build();
+    let expected = view_json(&full.view());
+    let mut reduced = build();
+    reduced.reduce();
+    assert_eq!(
+        view_json(&reduced.view()),
+        expected,
+        "reduction changed the view"
+    );
+
+    json!({
+        "description": "Merge fixture (spec §9.2): events and the vault view they produce",
+        "events": events().into_iter().map(|(client, seq, hlc, clock, ops)| json!({
+            "client_id": h(client), "seq": seq, "hlc": hlc,
+            "clock": clock_json(&VectorClock(clock)),
+            "ops": ops.iter().map(op_json).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "view": expected,
+    })
+}
+
+#[test]
+fn merge() {
+    check("merge.json", merge_vectors());
 }

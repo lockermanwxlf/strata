@@ -437,7 +437,7 @@ The vault's state is a pure function of the **set** of applied ops. Arrival orde
 - The candidates are `C = { w ∈ W : no w' ∈ W with w → w' }`.
 - **Secret field** (any candidate has `secret = true`):
   - `|C| = 1`: the field's value is that candidate.
-  - `|C| > 1`: a **conflict**. All candidate values are shown to the user, with `null` displayed as "deleted". To resolve it, the user writes a new `SetField`, which dominates every candidate. This is how "concurrent password changes keep both values" works.
+  - `|C| > 1`: a **conflict**. All candidate values are shown to the user, with `null` displayed as "deleted". If every candidate is `null`, nothing is in conflict and the field is absent. To resolve it, the user writes a new `SetField`, which dominates every candidate. This is how "concurrent password changes keep both values" works.
 - **Non-secret field:** the value is the candidate with the greatest `(hlc, client_id, seq, op_index)`. This is last-writer-wins, restricted to concurrent writes.
 - A field whose resolved value is `null` is absent.
 
@@ -469,7 +469,7 @@ An op may be dropped from the set without changing any of the results in §9.2 w
 | `SetField w` on `(x, f)` | some `w'` on the same `(x, f)` has `w → w'` |
 | `KeepEntry k` | some `w ∈ Writes(x)` has `k → w` |
 | `DeleteEntry d` | some `w ∈ Writes(x)` has `d → w`, or some `d' ∈ Deletes(x)` has `d → d'` |
-| `AddTag a` | some `RemoveTag` lists its dot |
+| `AddTag a` on `(x, t)` | some `RemoveTag` on the same `(x, t)` lists its dot |
 | `SetDeviceName n` | a later `SetDeviceName` exists from the same client |
 | `RemoveTag`, `RetireClient`, `RegisterDevice` | never (v1) |
 

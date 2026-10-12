@@ -429,6 +429,72 @@ def check_files():
     expect("snapshot file", signed + device_sign(seed, signed), h(sn["file"]))
 
 
+# ---- Merge (spec §9.2), written out from the spec's definitions -------------
+
+
+def check_merge():
+    v = load("merge.json")
+    ops = []  # (client, seq, index, hlc, clock, op)
+    for e in v["events"]:
+        clock = {c: s for c, s in e["clock"]}
+        for i, op in enumerate(e["ops"]):
+            ops.append((e["client_id"], e["seq"], i, e["hlc"], clock, op))
+
+    def before(a, b):  # a → b
+        if (a[0], a[1]) == (b[0], b[1]):
+            return a[2] < b[2]
+        return b[4].get(a[0], 0) >= a[1]
+
+    def dot(o):
+        return [o[0], o[1], o[2]]
+
+    def of(kind, **match):
+        return [o for o in ops if o[5]["type"] == kind and all(o[5].get(k) == val for k, val in match.items())]
+
+    entries = {}
+    for entry_id in sorted({o[5]["entry_id"] for o in ops if "entry_id" in o[5]}):
+        writes = of("SetField", entry_id=entry_id) + of("KeepEntry", entry_id=entry_id)
+        if not writes:
+            continue  # an entry exists iff it has a write
+        deletes = of("DeleteEntry", entry_id=entry_id)
+        deleted = any(all(before(w, d) for w in writes) for d in deletes)
+        unanswered = not deleted and any(not any(before(d, w) for w in writes) for d in deletes)
+
+        fields = {}
+        for name in sorted({o[5]["name"] for o in of("SetField", entry_id=entry_id)}):
+            group = of("SetField", entry_id=entry_id, name=name)
+            cands = [w for w in group if not any(before(w, other) for other in group)]
+            secret = any(c[5]["secret"] for c in cands)
+            if secret and len(cands) > 1:
+                if all(c[5]["value"] is None for c in cands):
+                    continue
+                cands.sort(key=lambda c: (bytes.fromhex(c[0]), c[1], c[2]))
+                fields[name] = {"conflict": [[c[5]["value"], dot(c)] for c in cands]}
+                continue
+            winner = max(cands, key=lambda c: (c[3], bytes.fromhex(c[0]), c[1], c[2]))
+            if winner[5]["value"] is not None:
+                fields[name] = {"secret": secret, "value": winner[5]["value"], "dot": dot(winner)}
+
+        tags = []
+        for tag in sorted({o[5]["tag"] for o in of("AddTag", entry_id=entry_id)}):
+            removed = {tuple(d) for r in of("RemoveTag", entry_id=entry_id, tag=tag) for d in r[5]["dots"]}
+            if any(tuple(dot(a)) not in removed for a in of("AddTag", entry_id=entry_id, tag=tag)):
+                tags.append(tag)
+
+        entries[entry_id] = {"deleted": deleted, "unanswered_delete": unanswered, "tags": tags, "fields": fields}
+
+    devices = {}
+    for reg in of("RegisterDevice"):
+        client = reg[5]["client_id"]
+        naming = [o for o in ops if o[0] == client and o[5]["type"] in ("RegisterDevice", "SetDeviceName")]
+        latest = max(naming, key=lambda o: (o[1], o[2]))
+        retired = [o[5]["last_seq"] for o in of("RetireClient", client_id=client)]
+        devices[client] = {"dev_pk": reg[5]["dev_pk"], "name": latest[5]["name"],
+                           "retired_after": min(retired) if retired else None}
+
+    expect("merge view", {"entries": entries, "devices": devices}, v["view"])
+
+
 if __name__ == "__main__":
     check_ietf_hpke_vector()
     check_kdf()
@@ -438,4 +504,5 @@ if __name__ == "__main__":
     check_ed25519()
     check_recovery()
     check_files()
+    check_merge()
     print(f"OK: {checks} checks passed")
