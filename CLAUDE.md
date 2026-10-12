@@ -19,6 +19,7 @@ Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync
 - **Slot scope:** `Synced` slots live in `slots/` on the remote. `Local` slots live only on the device and are never uploaded.
 - **Policy** (`policy.rs`, enforced in core, not only in the UI): PINs (weak protectors) are never synced, and locally they require a hardware-backed **and** rate-limited keystore. Passwords sync whatever their strength (the user's choice), but the UI warns about weak ones and requires confirmation.
 - **Slot-substitution defense:** store a key commitment / key ID, pin it locally on first enrollment, and refuse slots that unwrap to a different key.
+- **Device signing keys:** each device has an Ed25519 key, registered in its first event. It signs that device's events, snapshots and epoch records, so no key holder can forge another device's changes (spec §6.4).
 - **Revocation = rotation:** key epochs. New events use the new epoch key, and old epoch keys are stored wrapped under the new one. Removing a slot does not revoke a device that has already unlocked.
 
 ## Platform protectors
@@ -47,7 +48,7 @@ vault/
   snapshots/<snapshotId>.snap
 ```
 
-- **Each event:** ID, hybrid logical clock timestamp, causal info (vector clock or parents), and an AEAD payload. The vault ID, event ID and epoch are bound in as associated data.
+- **Each event:** ID, hybrid logical clock timestamp, causal info (vector clock or parents), an AEAD payload, and the writing device's signature. The vault ID, event ID and epoch are bound in as associated data.
 - **Merge** is deterministic and order-independent (CRDT-style): per-field registers, tombstones for deletes, sets for tags.
 - **Secret fields don't use LWW.** Concurrent password changes keep both values and surface a conflict to the user.
 - **Compaction:** snapshots keep the causal metadata of the ops they retain, so compaction is exact at any time. Event files a snapshot covers are deleted after a grace period. True purge rewrites history and rotates the epoch.
@@ -58,14 +59,13 @@ vault/
 ## Rules for working on crypto
 
 - **Spec first.** `docs/spec.md` is the source of truth for byte layouts, KDFs, parameters, and AEAD associated data. Implement against it and never invent constructions.
-- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256, HMAC-SHA256, and HPKE (X25519) for recovery slots, from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
+- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256, HMAC-SHA256, HPKE (X25519) for recovery slots, and Ed25519 for device signatures, from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
 - **Required tests:**
   - property tests that shuffle event order and assert convergence
   - parser fuzzing
   - fixed test vectors
   - negative tests: tampered events, swapped slots, replayed events, and rolled-back sequence numbers must each fail loudly
 - Never convert secrets to Kotlin `String`. Use `ByteArray`/`CharArray` and zero them.
-- Anything that changes the spec or crypto code needs human review before it holds real data.
 
 ## Commands
 

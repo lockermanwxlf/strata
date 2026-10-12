@@ -1,8 +1,8 @@
 # Strata vault format and cryptography
 
-**Status: DRAFT 0.2 (2026-10-11). Unreviewed. Must not hold real data until a human has reviewed it** (see CLAUDE.md, "Rules for working on crypto").
+**Status: DRAFT 0.3 (2026-10-11). No external review yet. Not yet safe for real passwords** (see implementation-plan.md, Phase 13).
 
-This document is the source of truth for byte layouts, key derivation, parameters and associated data. Code implements this spec. When the two disagree, the code is wrong or the spec gets changed through review. Items marked **OPEN-n** are undecided and collected in §15.
+This document is the source of truth for byte layouts, key derivation, parameters and associated data. Code implements this spec. When the two disagree, either the code is wrong or the spec needs a deliberate change. Items marked **OPEN-n** are undecided and collected in §15.
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
@@ -15,12 +15,13 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 - **An attacker who controls the remote storage.** They can read, delete, reorder and replay files, roll them back to older versions, and write arbitrary files. They learn only the metadata listed in §13 and cannot read or forge vault contents. Rollback, forks, replays and slot substitution are detected on any device that has synced before.
 - **An attacker who steals a locked device.** Local slots are bound to hardware keystores, and local state is encrypted.
 - **A revoked device** (one that once unlocked the vault). After key rotation (§7) it cannot read or write new data. It keeps everything it already had.
+- **One device impersonating another.** Every device signs what it writes with its own key (§6.4). Even a device holding the vault key cannot forge another device's events, so every change is attributable to a device.
 
 **Does not protect against:**
 
-- A compromised, unlocked device. It holds the keys.
+- A compromised, unlocked device. It holds the keys. It can write as itself and can register new devices, but those changes are attributed to it and show up in the device list.
 - A **fresh** device's first sync. There is nothing to compare against, so it is trust-on-first-use (§6.3). The exception is unlocking with the recovery key, which the anchor in §6.2.1 verifies.
-- One unlocked device impersonating another. All key holders share symmetric keys, so `client_id` is a label, not an authenticated identity (OPEN-7).
+- Misattribution inside a snapshot. A snapshot's retained ops keep their original dots, but not their original signatures, so attributing them relies on the snapshot's creator (§10.1).
 - Metadata leakage beyond §13.
 
 ## 2. Notation and conventions
@@ -32,10 +33,11 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 - **Random** always means the OS CSPRNG (`getrandom`). There are no user-space RNGs.
 - **Reject** means fail loudly. The item is not used, the error is surfaced, and where §9.4 says so an alarm is raised. Parsers never skip malformed data silently.
 - **AAD rule.** In every envelope below, the AEAD associated data is **every byte of the file before the ciphertext**, exactly as stored, nonce included.
+- **Signature rule.** Events, snapshots and epoch records end with a 64-byte device signature (§6.4) over **every byte of the file before it**.
 
 ## 3. Primitives
 
-These are the only primitives. Adding one needs review.
+These are the only primitives. Adding one means changing this spec.
 
 | Purpose | Primitive | Rust crate |
 |---|---|---|
@@ -45,6 +47,7 @@ These are the only primitives. Adding one needs review.
 | Hashing (hash chains, file IDs) | SHA-256 | `sha2` |
 | Public-key encryption (recovery slots) | HPKE (RFC 9180), Base mode. Suite: DHKEM(X25519, HKDF-SHA256) `0x0020`, HKDF-SHA256 `0x0001`, ChaCha20-Poly1305 `0x0003` | `hpke` |
 | MAC (recovery anchor) | HMAC-SHA256 (RFC 2104). This is the same HMAC that HKDF already uses. | `hmac` |
+| Signatures (device keys) | Ed25519 (RFC 8032), pure. Verification is strict: non-canonical encodings and small-order points are rejected. | `ed25519-dalek` (`verify_strict`) |
 | Constant-time compare | n/a | `subtle` |
 | Secret memory | n/a | `zeroize` |
 | Unicode normalization (passwords, names) | NFC | `unicode-normalization` |
@@ -59,7 +62,7 @@ There are two layers.
 2. **Bodies:** the authenticated plaintext inside the AEAD. These use CBOR (RFC 8949) restricted as follows.
    - **Deterministic encoding only** (RFC 8949 §4.2.1): shortest-form integers and lengths, definite lengths, and map keys sorted bytewise. Readers MUST enforce this by re-encoding the decoded value and comparing bytes.
    - **Allowed types:** unsigned int, byte string, text string (valid UTF-8), array, map, bool, null. No floats, tags, negative integers or indefinite lengths.
-   - **Maps use unsigned-integer keys.** Unknown keys are rejected in v1 (OPEN-8).
+   - **Maps use unsigned-integer keys.** Unknown keys and unknown op types are rejected. Anything new needs a new `format_version` (§12).
 3. **Padding.** Every encrypted body is padded before encryption:
 
    ```
@@ -243,6 +246,36 @@ XChaCha20-Poly1305 is not key-committing. An attacker who controls storage could
 5. **Device without a pin** (fresh install): pin `(e, key_id_e)`. This is trust-on-first-use. Showing a short `key_id` fingerprint that the user can compare between devices is OPEN-6.
 6. After unlock, the device holds `EK` for the current epoch and, through the chain, every earlier one.
 
+### 6.4 Device signing keys
+
+Every client has an Ed25519 key pair `(dev_sk, dev_pk)`. It generates the pair when it gets its `client_id`, and keeps `dev_sk` in its encrypted state record (§11). A device that becomes a new client (§9.4) generates a new pair.
+
+**Registration.** The first op of a client's first event `(c, 1)` MUST be `RegisterDevice(c, dev_pk, name)` (§8.2). `RegisterDevice` MUST NOT appear anywhere else. The vault's **device registry** maps `c` to that `dev_pk` (§9.2). A device's key never changes.
+
+**Signing.**
+
+```
+signature = Ed25519-Sign(dev_sk, "strata v1 signature" || every byte of the file before the signature)
+```
+
+**Which key verifies a file.**
+
+| File | Key |
+|---|---|
+| Event `(c, 1)` | the `dev_pk` in its own `RegisterDevice` op. It is self-signed. |
+| Event `(c, s > 1)` | `registry[c]`. Causal delivery (§9.1) applies `(c, 1)` first. |
+| Snapshot, epoch record | `registry[creator]`. If the creator isn't registered yet, verification waits until its registration arrives. A fresh device that learns the creator's key only from the snapshot itself accepts it on the same trust-on-first-use basis as §6.3. |
+
+An AEAD-valid file whose signature fails verification is **rejected and raises a forgery alarm** (§9.4). Only a vault-key holder can produce such a file, so it means a device is misbehaving.
+
+**Retired devices.** After `RetireClient(c, last_seq)`, a signature from `c` is accepted only on:
+
+- events with `s <= last_seq`
+- snapshots whose `watermark[c] <= last_seq`
+- epoch records whose `cutover[c] <= last_seq`
+
+Anything else signed by `c` is rejected.
+
 ## 7. Epochs and rotation
 
 ### 7.1 Epoch record
@@ -262,10 +295,13 @@ File name: `epochs/<epoch:08x>-<creator clientId>.epoch`. `C` below is `cutover_
 -- epoch > 0 only:
 [X..X+24)     nonce
 [X+24..X+72)  Seal(chain_key_epoch, nonce, EK_{epoch-1}, aad = [0..X+24))
+-- always:
+[last 64)     signature by the creator (§6.4)
 ```
 
-- Epoch 0 has `cutover_count = 0` and no chain wrap. Its only protection is the `key_id` check in §6.3.
-- For epoch > 0, the chain wrap authenticates the whole record under `EK_epoch`.
+- **Epoch 0** has `cutover_count = 0` and no chain wrap. It is protected by the `key_id` check in §6.3 and by its creator's signature.
+- **Epoch > 0:** the chain wrap authenticates the whole record under `EK_epoch`, and the signature attributes it to its creator.
+- **The cutover vector** is the creator's applied vector clock at rotation. It records which devices were known when the rotation happened (§7.2).
 
 ### 7.2 Rotation
 
@@ -284,7 +320,10 @@ Steps 2 and 3 complete before step 4, so a crash part-way through leaves the vau
 
 **Rotation never wraps the new key under an old one.** Otherwise a revoked holder of `EK_e` could follow the chain forward. The result is that other devices' local slots, which wrap `EK_e`, now open only the old epoch. Those devices fall back to a synced protector (the password) once, then re-wrap their local slots. The core can do that re-wrap in the same session without another biometric prompt.
 
-**Late events from an old epoch.** Take an event `(c, s)` in epoch `e' < current`. If `s > cutover_{e'+1}[c]` (a missing entry counts as 0), the event is **quarantined**: it is not merged, and the user is asked whether to apply it. Revoked devices can only produce events like this. An honest device that was offline during the rotation finds its own quarantined events and re-issues their ops as new events in the current epoch.
+**Late events from an old epoch.** These are legitimate when a device was offline during a rotation and wrote events under the key it had. Take an event `(c, s)` in epoch `e' < current`:
+
+- **`c` appears in `cutover_{e'+1}`** (the device was known when the rotation happened): accept it as usual. Its signature (§6.4) proves it came from `c` and not from some other holder of `EK_{e'}`. A revoked device is handled by its `RetireClient`.
+- **`c` doesn't appear:** **quarantine** the event. It isn't merged, and the user is asked whether to apply it. This catches a revoked device that registers a new identity under an old key. An honest device that joined just before the rotation and finds its own events quarantined re-issues their ops as new events in the current epoch.
 
 Concurrent rotations, meaning two records for the same epoch: OPEN-2.
 
@@ -303,10 +342,11 @@ File name: `events/<clientId>-<seq:016x>.evt`. `seq` starts at 1 for each client
 [40..48)  LE64 seq
 [48..52)  LE32 epoch
 [52..76)  nonce (24 bytes, random)
-[76..)    Seal(event_key_epoch, nonce, padded(body), aad = [0..76))
+[76..N-64)  Seal(event_key_epoch, nonce, padded(body), aad = [0..76))
+[N-64..N)   signature by client_id over [0..N-64) (§6.4)          N = file length
 ```
 
-The AAD binds the vault ID, event ID `(client_id, seq)` and epoch, as CLAUDE.md requires, plus the version and flags. The file hash `H(c, s) = SHA-256(the entire file)`.
+The AAD binds the vault ID, event ID `(client_id, seq)` and epoch, as CLAUDE.md requires, plus the version and flags. The file hash `H(c, s) = SHA-256(the entire file)`, signature included.
 
 ### 8.2 Body
 
@@ -333,6 +373,8 @@ VectorClock = [* [bstr .size 16, uint]]   ; (client_id, seq). Sorted by client_i
 | 4 | `AddTag` | `entry_id bstr16, tag tstr` |
 | 5 | `RemoveTag` | `entry_id bstr16, tag tstr, [* Dot]` (the observed `AddTag` dots) |
 | 6 | `RetireClient` | `client_id bstr16, last_seq uint` |
+| 7 | `RegisterDevice` | `client_id bstr16, dev_pk bstr32, name tstr`. Only as op 0 of `(c, 1)`, with `client_id = c` (§6.4). |
+| 8 | `SetDeviceName` | `name tstr`. Renames the device that wrote the event. |
 
 Notes:
 
@@ -362,13 +404,15 @@ For each new event file, in any order, a reader:
 
 1. Parses the envelope and checks the name match, version, `flags = 0` and `vault_id`.
 2. Gets the key for the event's epoch. If the epoch is unknown, it holds the event and retries after processing epoch records. It then decrypts, checks the padding, and checks that the CBOR is deterministic and matches the schema and limits.
-3. **Rejects** the event in any of these cases:
+3. Verifies the signature with the key from §6.4. If it fails, the event is rejected and a forgery alarm is raised.
+4. **Rejects** the event in any of these cases:
+   - `RegisterDevice` is missing from op 0 of `(c, 1)`, appears anywhere else, or names a `client_id` other than `c`.
    - `VC[c] != s`.
    - The predecessor `(c, s-1)` is available and either its vector clock is not componentwise ≤ this event's, or its HLC is not lower.
    - `prev_hash` doesn't match the predecessor's file hash. When the predecessor has been compacted, the snapshot's watermark hash is used instead (§10.1).
-4. **Holds** the event until every event its vector clock names has been applied or is covered by a snapshot (causal delivery). An event held longer than 7 days raises a warning.
-5. Applies the cutover check (§7.2) and the retirement check: reject `(c, s)` when `RetireClient(c, last_seq)` exists and `s > last_seq`.
-6. Applies the event by adding its ops to the op set. The device's **applied vector clock** maps each client to the highest contiguous seq it has applied.
+5. **Holds** the event until every event its vector clock names has been applied or is covered by a snapshot (causal delivery). An event held longer than 7 days raises a warning.
+6. Runs the old-epoch check (§7.2) and the retirement check: reject `(c, s)` when `RetireClient(c, last_seq)` exists and `s > last_seq`.
+7. Applies the event by adding its ops to the op set. The device's **applied vector clock** maps each client to the highest contiguous seq it has applied.
 
 ### 9.2 Merge semantics
 
@@ -402,6 +446,14 @@ The vault's state is a pure function of the **set** of applied ops. Arrival orde
 
 **Tags** on `(x, t)` form an observed-remove set: a tag is present iff some `AddTag` on `(x, t)` has a dot that no `RemoveTag` on `(x, t)` lists. Adds win over concurrent removes.
 
+**Device registry.** For each client `c`:
+
+- `dev_pk` comes from its `RegisterDevice`.
+- Its name is the name in the latest of its `RegisterDevice` and `SetDeviceName` ops. A client's own events are totally ordered, so "latest" is well defined.
+- It is **retired** iff some `RetireClient(c, …)` exists. If there are several, the lowest `last_seq` applies.
+
+The UI shows the registry as the device list, and attributes changes to devices through each op's dot.
+
 ### 9.3 Reduction (which ops may be dropped)
 
 An op may be dropped from the set without changing any of the results in §9.2 when one of these holds:
@@ -412,7 +464,8 @@ An op may be dropped from the set without changing any of the results in §9.2 w
 | `KeepEntry k` | some `w ∈ Writes(x)` has `k → w` |
 | `DeleteEntry d` | some `w ∈ Writes(x)` has `d → w`, or some `d' ∈ Deletes(x)` has `d → d'` |
 | `AddTag a` | some `RemoveTag` lists its dot |
-| `RemoveTag`, `RetireClient` | never (v1) |
+| `SetDeviceName n` | a later `SetDeviceName` exists from the same client |
+| `RemoveTag`, `RetireClient`, `RegisterDevice` | never (v1) |
 
 **Why this preserves the results:** happened-before is transitive, and a dropped op is always dominated by an op that is kept. Every dropped op is therefore replaced by a witness that gives the same answer for "deleted", "unanswered delete" and "candidates", both now and for any op that arrives later. A consequence is that **the union of two reduced sets, re-reduced, equals the reduction of the union**. Snapshots can be combined freely, and replaying an event that is already covered changes nothing.
 
@@ -423,6 +476,7 @@ Every device keeps a **high-water mark** for each client in its local state: `HW
 - **Rollback.** The event `(c, HWM[c].seq)` is missing, and no snapshot watermark covers it, or the highest event or watermark for `c` is lower than `HWM[c].seq`.
 - **Fork.** The file at `(c, HWM[c].seq)` has a different hash, any hash-chain link fails, or a file name the writer is about to create already exists.
 - **Replay and relocation.** These are caught by the AAD binding. A copied or renamed file fails AEAD authentication or the name check. A re-uploaded file that a snapshot already covers is ignored.
+- **Forgery.** An AEAD-valid file with a bad device signature (§6.4).
 
 On an alarm, the device stops writing to the remote, keeps working from its local copy, and shows the user what failed. Recovery is a user decision. Automatic recovery is out of scope for v1.
 
@@ -443,8 +497,11 @@ File name: `snapshots/<snapshotId>.snap`.
 [40..56)  creator client_id
 [56..60)  LE32 epoch                      the current epoch when it was written
 [60..84)  nonce
-[84..)    Seal(snapshot_key_epoch, nonce, padded(body), aad = [0..84))
+[84..N-64)  Seal(snapshot_key_epoch, nonce, padded(body), aad = [0..84))
+[N-64..N)   signature by the creator over [0..N-64) (§6.4)        N = file length
 ```
+
+The retained ops keep their original dots, so the UI can still attribute them, but not their original signatures. That attribution rests on the snapshot creator, a registered device whose own signature is checked.
 
 ```
 SnapshotBody = {
@@ -458,7 +515,7 @@ RetainedOp = [client_id bstr16, seq uint, op_index uint, hlc uint, vc_index uint
 
 ### 10.2 Loading
 
-1. Decrypt and validate the snapshot as in §9.1, steps 1 and 2.
+1. Decrypt and validate the snapshot as in §9.1, steps 1 to 3: the envelope, decryption, and the creator's signature.
 2. Check its watermark against the HWM (§9.4). A watermark below the HWM for any client is a rollback alarm.
 3. Take the union of its retained ops with the device's op set and re-reduce.
 4. Raise the HWM to the watermark.
@@ -505,6 +562,7 @@ The layout is implementation-defined. Local state is never shared, so it isn't p
 **State record.** XChaCha20-Poly1305 under `local_key_e`, where the record names `e` in cleartext. It holds:
 
 - the pin `(e_p, key_id_p)`
+- the device signing key `dev_sk` (§6.4)
 - `next_seq`
 - the HWM table
 - the applied vector clock
@@ -518,7 +576,12 @@ A platform key that has been invalidated (for example, because biometric enrollm
 
 ## 12. Versioning
 
-Every envelope carries `format_version = 1` and `flags = 0`. Readers reject any other value. A future incompatible change bumps `format_version`. Migration is a full rewrite through a new snapshot plus rotation.
+Every envelope carries `format_version = 1` and `flags = 0`.
+
+- **Strict compatibility.** There are no ignorable extensions. Any new field, op type or semantic change bumps `format_version`. Letting older readers skip unknown ops risks devices on different versions silently computing different vault contents.
+- **A newer version is not an alarm.** A reader that sees `format_version` above what it supports reports **"update required"**. It stops writing to the remote and keeps the local copy readable. Something that could also be an attacker planting a fake newer file is, at worst, the same denial of service as deleting files.
+- **Anything else is malformed.** A version of 0, nonzero flags, or a version too old to be valid is rejected (§2).
+- **Migration** to a new version is a full rewrite: a new snapshot plus a rotation.
 
 ## 13. What the remote learns
 
@@ -545,7 +608,8 @@ Vectors are stored as JSON in `core/strata-core/tests/vectors/`. The reference i
 2. Argon2id `S` for a password slot, with a non-ASCII password to exercise NFC normalization.
 3. A complete slot file (each of kinds 1 to 3), an epoch record (epoch 0 and epoch 1), an event file and a snapshot file, all with fixed nonces. The kind-2 vector also fixes the HPKE ephemeral key, plus `DeriveKeyPair(R)` and the recovery anchor.
 4. Padmé for body lengths at the boundaries: 0, 252, 253, 1000 and 1 MiB.
-5. A merge fixture: a set of events and the expected materialized state, covering a secret conflict, LWW, delete versus concurrent edit, `KeepEntry`, and tag add/remove.
+5. A merge fixture: a set of events and the expected materialized state, covering a secret conflict, LWW, delete versus concurrent edit, `KeepEntry`, tag add/remove, and device registration and renaming.
+6. Ed25519 signatures over the full files in item 3. Ed25519 is deterministic, so these are fixed.
 
 ### 14.2 Property tests and fuzzing
 
@@ -570,7 +634,13 @@ Each of these MUST fail loudly:
 | | recovery slot with its `anchor_epoch` or `anchor_tag` altered | anchor check fails |
 | Replayed events | event copied to another seq | rejected |
 | | old event re-uploaded after GC | ignored, state unchanged |
-| | event from a revoked client past the cutover | quarantined |
+| | event from a retired client with `s > last_seq` | rejected |
+| | old-epoch event from a client not in the cutover | quarantined |
+| | old-epoch event from a known client, after the rotation | accepted (signature verified) |
+| Forgery | AEAD-valid event with a bad signature | forgery alarm |
+| | event for client `c` signed with another device's key | forgery alarm |
+| | `RegisterDevice` missing from `(c, 1)`, repeated later, or naming another client | rejected |
+| | snapshot or epoch record signed by a retired device after its `last_seq` | rejected |
 | Rollback | highest seq lowered | rollback alarm |
 | | event removed from the middle of a chain | rollback alarm |
 | | older snapshot restored | rollback alarm |
@@ -585,16 +655,17 @@ Each of these MUST fail loudly:
 4. **FIDO2.** RP ID, whether user verification is required, and whether to require a resident (discoverable) credential.
 5. ~~Strength thresholds.~~ **Resolved 2026-10-11:** passwords of any strength may sync. The UI warns and requires confirmation below about 10^10 estimated guesses (§6.2). PINs remain local-only.
 6. **TOFU fingerprint.** Should a short `key_id` fingerprint be shown so the user can compare it across devices on first enrollment?
-7. **Per-device signing keys** (Ed25519) would give events authenticated origins and limit what a single compromised device can forge. Another primitive.
-8. **Forward compatibility.** v1 rejects unknown CBOR keys and op types. Should there be a range of keys and ops that older readers ignore and preserve?
+7. ~~Per-device signing keys.~~ **Resolved 2026-10-11:** every device signs its events, snapshots and epoch records with Ed25519 (§6.4). This also lets offline devices' late old-epoch events through without quarantine (§7.2).
+8. ~~Forward compatibility.~~ **Resolved 2026-10-11:** strict. A newer version reports "update required" rather than an alarm (§12).
 9. **Garbage collection.** Is 30 days the right grace period, and should GC be automatic or user-triggered?
 10. **Purge details.** Ordering and crash safety of "write snapshot, delete everything else, rotate".
-11. **CBOR crate choice.** `minicbor` or `ciborium`. Either way the re-encode check is mandatory.
+11. ~~CBOR crate choice.~~ **Resolved 2026-10-11:** `minicbor`. The re-encode check (§4) is still mandatory.
 12. **Attachments.** Out of scope for v1. The 1 MiB body limit excludes them.
+13. **Hardware-backed device keys.** `dev_sk` is a software key in encrypted local state. Platform keystores that can do Ed25519 could hold it instead, and so could Android Keystore on newer API levels. That's a later improvement, and it doesn't change the format.
 
 ## 16. References
 
-- RFC 2104 (HMAC). RFC 5869 (HKDF). RFC 9106 (Argon2). RFC 8439 (ChaCha20-Poly1305). draft-irtf-cfrg-xchacha (XChaCha20). RFC 8949 (CBOR). RFC 9180 (HPKE).
+- RFC 2104 (HMAC). RFC 5869 (HKDF). RFC 8032 (Ed25519). RFC 9106 (Argon2). RFC 8439 (ChaCha20-Poly1305). draft-irtf-cfrg-xchacha (XChaCha20). RFC 8949 (CBOR). RFC 9180 (HPKE).
 - Nikitin et al., "Reducing Metadata Leakage from Encrypted Files and Communication with PURBs", PETS 2019 (Padmé).
 - Kulkarni et al., "Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases", 2014 (HLC).
 - Shapiro et al., "Conflict-free Replicated Data Types", 2011. Almeida et al., "Delta State Replicated Data Types", 2018.
