@@ -1,0 +1,27 @@
+# Fuzz targets for the core's parsers (spec §14.2). Needs nightly and cargo-fuzz:
+#   cd core && cargo +nightly fuzz run <target>
+# Kept out of the main workspace because libFuzzer only builds on nightly.
+
+[package]
+name = "strata-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+strata-core = { path = "../strata-core" }
+
+[[bin]]
+name = "reader"
+path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

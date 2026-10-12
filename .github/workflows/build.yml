@@ -33,6 +33,31 @@ jobs:
       - working-directory: core
         run: cargo test
 
+  deny:
+    name: Rust dependency licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: core/Cargo.toml
+
+  fuzz:
+    name: Fuzz smoke test (60 s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/fuzz
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: core
+        run: |
+          for target in $(cargo fuzz list); do
+            cargo fuzz run "$target" -- -max_total_time=60
+          done
+
   desktop:
     name: Desktop (${{ matrix.os }})
     needs: rust

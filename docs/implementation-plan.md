@@ -63,8 +63,8 @@ Resolved: OPEN-1 (HPKE recovery slot), OPEN-3 (BIP39), OPEN-5 (passwords warn, n
   | `platform/` | platform protectors |
 
 - **Dependencies:**
-  - Runtime: `chacha20poly1305`, `argon2`, `hkdf`, `sha2`, `hmac`, `hpke`, `ed25519-dalek`, `subtle`, `zeroize`, `getrandom`, `unicode-normalization`, `minicbor`, `bip39`, `zxcvbn`
-  - Dev: `proptest`, `serde_json`, `hex`, `tempfile`
+  - Runtime: `chacha20poly1305`, `argon2`, `hkdf`, `sha2`, `hmac`, `hpke` (X-Wing via its `mlkem` feature), `ed25519-dalek`, `subtle`, `zeroize`, `getrandom`, `unicode-normalization`, `minicbor`, `bip39`. Default features are trimmed to what the spec uses. `zxcvbn` is added in Phase 3, where it's first used.
+  - Dev: `proptest`. `serde_json`, `hex` and `tempfile` are added when first used.
 - **Secret types:** `SecretKey`, plus `SecretBytes` wrapping `Zeroizing<Vec<u8>>`.
   - They implement `ZeroizeOnDrop`, and their `Debug` prints `[redacted]`.
   - They don't implement `Clone`, except where explicit.
@@ -81,6 +81,17 @@ Resolved: OPEN-1 (HPKE recovery slot), OPEN-3 (BIP39), OPEN-5 (passwords warn, n
 - **Rust linting:** `#![forbid(unsafe_code)]` in the format and merge modules. Platform modules may opt out where FFI calls need `unsafe`.
 
 **Exit:** the crate structure compiles, and CI runs the new jobs, even though they're still empty.
+
+**Status: done (2026-10-11).**
+
+- **Code:**
+  - `SecretKey` and `SecretBytes` are in `crypto/secret.rs`.
+  - `CoreError` and `AlarmKind` are in `error.rs`.
+  - The bounds-checked `Reader` is in `encoding/reader.rs`, with a property test and the first fuzz target (`core/fuzz`, target `reader`).
+- **Tooling:**
+  - `core/deny.toml` allows only GPL-compatible licenses. `minicbor` is BlueOak-1.0.0, which is permissive.
+  - CI has new `deny` and `fuzz` jobs.
+- **Deferred to Phase 1:** the test-vector cross-check job, because there are no vectors yet.
 
 ### Phase 1: Crypto primitives and encodings (M) · spec §2–4, §6.1, §6.2.1
 
@@ -103,7 +114,8 @@ All pure functions with no I/O.
 
 - Unit tests per function.
 - **Test vectors** for §14.1 items 1, 2 and 4, and the HPKE and anchor parts of item 3, in `core/strata-core/tests/vectors/*.json`.
-- **Independent cross-check.** `core/tools/vectors/check.py` recomputes every vector with Python `cryptography`, `argon2-cffi`, `pyhpke` and `cbor2`. CI runs it on Ubuntu. Python isn't installed on the Windows dev machine, so it runs in CI only, unless Python is installed later.
+- **Independent cross-check.** `core/tools/vectors/check.py` recomputes every vector with Python `cryptography`, `argon2-cffi` and `cbor2`. CI runs it on Ubuntu. Python isn't installed on the Windows dev machine, so it runs in CI only, unless Python is installed later.
+  - **X-Wing HPKE needs a second implementation that supports KEM `0x647a`.** Finding one is the first task of Phase 1. Candidates are Go's HPKE packages (for example `filippo.io/hpke`) or a Python package, if a maintained one exists. If none fits, cross-check against the draft's published test vectors instead.
 
 **Exit:** the vectors pass in Rust and in Python. Then a **review checkpoint: crypto primitives.**
 

@@ -12,3 +12,26 @@ crate-type = ["cdylib", "lib"]
 uniffi = { workspace = true }
 async-trait = "0.1"
 thiserror = "2"
+
+# Crypto: only the primitives in docs/spec.md §3. Default features are trimmed
+# so nothing outside the spec gets compiled in (e.g. hpke's NIST-curve KEMs, or
+# argon2's PHC password-hash strings). hpke's `mlkem` feature provides X-Wing.
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+hkdf = "0.13.0"
+sha2 = "0.11.0"
+hmac = "0.13.0"
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "mlkem", "hkdfsha2", "chacha"] }
+ed25519-dalek = "3.0.0"
+subtle = "2.6.1"
+getrandom = "0.4.3"
+zeroize = { version = "1.9.1", features = ["derive"] }
+
+# Encoding
+unicode-normalization = "0.1.25"
+minicbor = { version = "2.3.0", features = ["alloc", "derive"] }
+# English word list only; we use BIP39's encoding, never its seed derivation.
+bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
+
+[dev-dependencies]
+proptest = "1.12.0"

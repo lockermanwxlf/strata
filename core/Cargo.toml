@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["strata-core", "uniffi-bindgen"]
+# Nightly-only libFuzzer targets; built separately with cargo-fuzz.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
