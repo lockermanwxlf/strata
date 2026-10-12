@@ -45,7 +45,7 @@ These are the only primitives. Adding one means changing this spec.
 | Password hashing | Argon2id, version 0x13 (RFC 9106) | `argon2` |
 | Key derivation | HKDF-SHA256 (RFC 5869) | `hkdf`, `sha2` |
 | Hashing (hash chains, file IDs) | SHA-256 | `sha2` |
-| Public-key encryption (recovery slots) | HPKE (RFC 9180), Base mode. Suite: DHKEM(X25519, HKDF-SHA256) `0x0020`, HKDF-SHA256 `0x0001`, ChaCha20-Poly1305 `0x0003` | `hpke` |
+| Public-key encryption (recovery slots) | HPKE (RFC 9180), Base mode. Suite: KEM **X-Wing** (MLKEM768-X25519, a post-quantum/classical hybrid) `0x647a`, KDF HKDF-SHA256 `0x0001`, AEAD ChaCha20-Poly1305 `0x0003`. X-Wing uses SHA3-256 and SHAKE256 internally; those count as part of the KEM, not as separate primitives. | `hpke` (`mlkem` feature) |
 | MAC (recovery anchor) | HMAC-SHA256 (RFC 2104). This is the same HMAC that HKDF already uses. | `hmac` |
 | Signatures (device keys) | Ed25519 (RFC 8032), pure. Verification is strict: non-canonical encodings and small-order points are rejected. | `ed25519-dalek` (`verify_strict`) |
 | Constant-time compare | n/a | `subtle` |
@@ -53,6 +53,10 @@ These are the only primitives. Adding one means changing this spec.
 | Unicode normalization (passwords, names) | NFC | `unicode-normalization` |
 
 HKDF is always used as `HKDF(salt, ikm, info, 32)`: Extract with `salt`, then Expand with `info` to 32 bytes.
+
+**Why X-Wing.** Everything else here is symmetric, and 256-bit symmetric keys hold up against quantum attacks. The recovery slot is the one place where a public key sits in cleartext on the remote. With plain X25519, anyone who copied the vault files could use a future quantum computer to derive the private key, open the slot, and then follow the epoch chain to read the whole history ("harvest now, decrypt later"). A hybrid stays secure as long as either X25519 or ML-KEM-768 (FIPS 203) holds. X-Wing's HPKE codepoint comes from an Internet-Draft (draft-ietf-hpke-pq, as implemented by `hpke` 0.14). Strata pins that exact behavior with test vectors. If the final RFC changes it, adopting the change is a `format_version` bump.
+
+Ed25519 device signatures are not post-quantum. That is deliberate: forging a signature only helps an attacker once such a computer exists, which leaves nothing to harvest today, and device public keys exist only inside encrypted bodies. A later format version can switch to ML-DSA if needed.
 
 ## 4. Encoding
 
@@ -153,7 +157,7 @@ Every `S` and KEK is zeroized immediately after use.
 | Kind | Code | Scope | Slot secret `S` | `params` |
 |---|---|---|---|---|
 | Password | 1 | Synced | `Argon2id(P, salt, m, t, p, 32)`, where `P` is the UTF-8 password after NFC normalization, with no trimming | `LE32 m_kib, LE32 t, LE32 p, salt[16]` (28 bytes) |
-| Recovery key | 2 | Synced | none: HPKE to a key pair derived from the recovery key `R` (§6.2.1) | `pk[32], LE32 anchor_epoch, anchor_tag[32]` (68 bytes) |
+| Recovery key | 2 | Synced | none: HPKE to an X-Wing key pair derived from the recovery key `R` (§6.2.1) | `pk[1216], LE32 anchor_epoch, anchor_tag[32]` (1252 bytes) |
 | FIDO2 `hmac-secret` | 3 | Synced | the 32-byte `hmac-secret` output for `salt32` | `salt32[32], LE16 len, credential_id[len]` with `1 <= len <= 1023`. RP ID: OPEN-4. |
 | Platform keystore | 4 | **Local only** | 32 random bytes, protected by a `PlatformProtector` (§11) | `u8 protector_id, LE16 len, blob[len]` |
 
@@ -187,7 +191,7 @@ The maximums stop a malicious slot from exhausting memory or CPU. The minimums e
 [47+P..)    wrap, depending on kind:
               kinds 1, 3:  nonce[24] || XChaCha20-Poly1305 ciphertext of EK_epoch [48]
                            AAD = [0..71+P), i.e. everything before the ciphertext
-              kind 2:      enc[32] || HPKE ciphertext of EK_epoch [48]   (§6.2.1)
+              kind 2:      enc[1120] || HPKE ciphertext of EK_epoch [48]   (§6.2.1)
                            HPKE aad = [0..47+P); HPKE itself binds enc
 ```
 
@@ -195,10 +199,11 @@ Binding the vault ID, slot ID, epoch, kind and params means a slot can't be move
 
 ### 6.2.1 Recovery slot
 
-The recovery key is `R`: 32 random bytes (256 bits). It is shown to the user once, as a 24-word BIP39 mnemonic (English word list). BIP39's 8-bit checksum catches typos when the user types it back in. Only BIP39's encoding is used, never its PBKDF2 seed derivation. `R` is derived into an X25519 key pair:
+The recovery key is `R`: 32 random bytes (256 bits). It is shown to the user once, as a 24-word BIP39 mnemonic (English word list). BIP39's 8-bit checksum catches typos when the user types it back in. Only BIP39's encoding is used, never its PBKDF2 seed derivation. `R` is derived into an X-Wing key pair:
 
 ```
-(sk, pk) = DeriveKeyPair(R)          RFC 9180 §7.1.3, for the suite in §3
+(sk, pk) = DeriveKeyPair(R)          X-Wing's HPKE DeriveKeyPair (draft-ietf-hpke-pq),
+                                     for the suite in §3. sk is a 32-byte seed; pk is 1216 bytes.
 ```
 
 **Wrap.** No `R` is needed, so rotation (§7.2) can re-wrap the recovery slot without the user producing the recovery key:
@@ -649,7 +654,7 @@ Each of these MUST fail loudly:
 
 ## 15. Open questions
 
-1. ~~Rotation needs every protector present.~~ **Resolved 2026-10-11:** recovery slots use HPKE with X25519, plus an anchor (§6.2.1). FIDO2 tokens still have to be present at rotation, or their slots are dropped and offered for re-enrollment.
+1. ~~Rotation needs every protector present.~~ **Resolved 2026-10-11:** recovery slots use HPKE with the X-Wing post-quantum hybrid KEM, plus an anchor (§3, §6.2.1). FIDO2 tokens still have to be present at rotation, or their slots are dropped and offered for re-enrollment.
 2. **Concurrent rotations** produce two records for the same epoch. A proposed rule: the record with the bytewise-lowest `key_id` wins. The losing creator unlocks the winner with a synced protector, re-issues its events from the losing epoch, and writes no further events in that epoch.
 3. ~~Recovery key format.~~ **Resolved 2026-10-11:** 256 bits, shown as a 24-word BIP39 mnemonic (§6.2.1).
 4. **FIDO2.** RP ID, whether user verification is required, and whether to require a resident (discoverable) credential.
@@ -666,6 +671,7 @@ Each of these MUST fail loudly:
 ## 16. References
 
 - RFC 2104 (HMAC). RFC 5869 (HKDF). RFC 8032 (Ed25519). RFC 9106 (Argon2). RFC 8439 (ChaCha20-Poly1305). draft-irtf-cfrg-xchacha (XChaCha20). RFC 8949 (CBOR). RFC 9180 (HPKE).
+- FIPS 203 (ML-KEM). draft-connolly-cfrg-xwing-kem (X-Wing). draft-ietf-hpke-pq (post-quantum KEMs for HPKE, X-Wing codepoint `0x647a`).
 - Nikitin et al., "Reducing Metadata Leakage from Encrypted Files and Communication with PURBs", PETS 2019 (Padmé).
 - Kulkarni et al., "Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases", 2014 (HLC).
 - Shapiro et al., "Conflict-free Replicated Data Types", 2011. Almeida et al., "Delta State Replicated Data Types", 2018.

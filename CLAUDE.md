@@ -15,7 +15,7 @@ Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync
 ## Key hierarchy (LUKS / age style)
 
 - **Vault key:** random 256-bit, one per key epoch. HKDF derives the key ID and the event, snapshot, epoch-chain and local-state keys from it. There is no MAC subkey; AEAD associated data binds all context.
-- **Slots:** each slot wraps the vault key under a KEK derived from one protector: password (Argon2id), FIDO2 `hmac-secret`/YubiKey, or platform keystore. The exception is the 256-bit recovery key, which is an X25519 key pair (HPKE). Rotation can re-wrap to its public key without the user producing the recovery key, and an anchor MAC stops a fabricated vault from opening with it (spec §6.2.1).
+- **Slots:** each slot wraps the vault key under a KEK derived from one protector: password (Argon2id), FIDO2 `hmac-secret`/YubiKey, or platform keystore. The exception is the 256-bit recovery key, which is an X-Wing key pair (HPKE; X25519 + ML-KEM-768 hybrid, so files harvested today stay safe against future quantum computers). Rotation can re-wrap to its public key without the user producing the recovery key, and an anchor MAC stops a fabricated vault from opening with it (spec §6.2.1).
 - **Slot scope:** `Synced` slots live in `slots/` on the remote. `Local` slots live only on the device and are never uploaded.
 - **Policy** (`policy.rs`, enforced in core, not only in the UI): PINs (weak protectors) are never synced, and locally they require a hardware-backed **and** rate-limited keystore. Passwords sync whatever their strength (the user's choice), but the UI warns about weak ones and requires confirmation.
 - **Slot-substitution defense:** store a key commitment / key ID, pin it locally on first enrollment, and refuse slots that unwrap to a different key.
@@ -59,7 +59,7 @@ vault/
 ## Rules for working on crypto
 
 - **Spec first.** `docs/spec.md` is the source of truth for byte layouts, KDFs, parameters, and AEAD associated data. Implement against it and never invent constructions.
-- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256, HMAC-SHA256, HPKE (X25519) for recovery slots, and Ed25519 for device signatures, from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
+- **Vetted, high-level primitives only:** XChaCha20-Poly1305, Argon2id, HKDF-SHA256, HMAC-SHA256, HPKE with X-Wing for recovery slots, and Ed25519 for device signatures, from RustCrypto or libsodium bindings. No raw AES modes, no hand-rolled constructions.
 - **Required tests:**
   - property tests that shuffle event order and assert convergence
   - parser fuzzing
