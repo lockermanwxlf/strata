@@ -17,3 +17,10 @@ lto = "thin"
 codegen-units = 1
 # Not "symbols": UniFFI reads its metadata from exported symbols in the built library.
 strip = "debuginfo"
+
+# Argon2 at the spec's 64 MiB takes many seconds unoptimized. Optimize it even in
+# dev and test builds (test inherits dev).
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

@@ -42,6 +42,14 @@ jobs:
         with:
           manifest-path: core/Cargo.toml
 
+  vectors:
+    name: Test vectors (independent cross-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run core/tools/vectors/check.py
+
   fuzz:
     name: Fuzz smoke test (60 s per target)
     runs-on: ubuntu-latest

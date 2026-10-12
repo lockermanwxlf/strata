@@ -5,7 +5,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aead;
+pub mod kdf;
+pub mod recovery;
 pub mod secret;
+pub mod sign;
 
 pub use secret::{SecretBytes, SecretKey};
 

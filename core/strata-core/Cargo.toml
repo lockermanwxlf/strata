@@ -15,13 +15,14 @@ thiserror = "2"
 
 # Crypto: only the primitives in docs/spec.md §3. Default features are trimmed
 # so nothing outside the spec gets compiled in (e.g. hpke's NIST-curve KEMs, or
-# argon2's PHC password-hash strings). hpke's `mlkem` feature provides X-Wing.
+# argon2's PHC password-hash strings). hpke needs both `x25519` and `mlkem` for X-Wing.
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 hkdf = "0.13.0"
-sha2 = "0.11.0"
-hmac = "0.13.0"
-hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "mlkem", "hkdfsha2", "chacha"] }
+# `zeroize` wipes the SHA-256 states (and so HKDF/HMAC pads keyed by secrets) on drop.
+sha2 = { version = "0.11.0", features = ["zeroize"] }
+hmac = { version = "0.13.0", features = ["zeroize"] }
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "getrandom", "x25519", "mlkem", "chacha"] }
 ed25519-dalek = "3.0.0"
 subtle = "2.6.1"
 getrandom = "0.4.3"
@@ -34,4 +35,7 @@ minicbor = { version = "2.3.0", features = ["alloc", "derive"] }
 bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 
 [dev-dependencies]
+hex = "0.4.3"
 proptest = "1.12.0"
+serde_json = "1.0.154"
+unicode-normalization = "0.1.25"

@@ -607,7 +607,7 @@ It does not learn entry contents, titles, URLs, tags, the number of entries (bey
 
 ### 14.1 Test vectors
 
-Vectors are stored as JSON in `core/strata-core/tests/vectors/`. The reference implementation generates them, then an **independent implementation** recomputes them before they are frozen (Python `cryptography`, `argon2-cffi` and `cbor2` are suggested). Required vectors:
+Vectors are stored as JSON in `core/strata-core/tests/vectors/`. The reference implementation generates them, then an **independent implementation** recomputes them before they are frozen. That implementation is `core/tools/vectors/check.py`, built on Python libraries that share no code with the Rust crates. The official IETF vector for Strata's exact HPKE suite (draft-ietf-hpke-pq-04, A.5.1) is kept alongside them, and both implementations must reproduce it. Required vectors:
 
 1. HKDF derivations for every label in §6.1 and the slot KEK.
 2. Argon2id `S` for a password slot, with a non-ASCII password to exercise NFC normalization.

@@ -1,0 +1,35 @@
+{
+  "cases": [
+    {
+      "m_kib": 65536,
+      "note": "NFD input: 'cafe' + combining acute, normalized to NFC",
+      "p": 4,
+      "password_nfc_utf8": "636166c3a920f09f9492",
+      "password_utf8": "63616665cc8120f09f9492",
+      "salt": "606162636465666768696a6b6c6d6e6f",
+      "slot_secret": "7a419012fc037df4d944b996f90e65d5deafe68daba86695c77151359e4d4b05",
+      "t": 3
+    },
+    {
+      "m_kib": 65536,
+      "note": "NFC input: same password, already composed",
+      "p": 4,
+      "password_nfc_utf8": "636166c3a920f09f9492",
+      "password_utf8": "636166c3a920f09f9492",
+      "salt": "606162636465666768696a6b6c6d6e6f",
+      "slot_secret": "7a419012fc037df4d944b996f90e65d5deafe68daba86695c77151359e4d4b05",
+      "t": 3
+    },
+    {
+      "m_kib": 65536,
+      "note": "ASCII",
+      "p": 4,
+      "password_nfc_utf8": "636f727265637420686f727365206261747465727920737461706c65",
+      "password_utf8": "636f727265637420686f727365206261747465727920737461706c65",
+      "salt": "606162636465666768696a6b6c6d6e6f",
+      "slot_secret": "97009c0b73e7478fac40f652da5c0199ebdda2f5a96266d1601520ab2875e6fe",
+      "t": 3
+    }
+  ],
+  "description": "Argon2id v0x13 password slot secret (spec §6.2); input is NFC-normalized first"
+}

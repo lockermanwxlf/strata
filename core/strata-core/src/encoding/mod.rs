@@ -2,6 +2,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cbor;
+pub mod padding;
 pub mod reader;
 
 pub use reader::Reader;

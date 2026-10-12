@@ -74,6 +74,8 @@ vault/
 - `./gradlew :androidApp:installDebug`: build with cargo-ndk and install to a device or emulator
 - `./gradlew :desktopApp:packageDistributionForCurrentOS`: installer for this OS
 - `cd core && cargo test && cargo clippy`: Rust tests and lints
+- `uv run core/tools/vectors/check.py`: recompute the test vectors with independent (non-Rust) implementations
+- `cd core && STRATA_WRITE_VECTORS=1 cargo test --test vectors`: regenerate vectors after a deliberate spec change; then run the check above
 
 ## Gotchas
 

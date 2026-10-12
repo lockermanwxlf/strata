@@ -50,7 +50,7 @@ Resolved: OPEN-1 (HPKE recovery slot), OPEN-3 (BIP39), OPEN-5 (passwords warn, n
 
   | Module | Contents |
   |---|---|
-  | `crypto/` | `aead.rs`, `kdf.rs`, `hpke.rs`, `sign.rs`, `secret.rs` |
+  | `crypto/` | `aead.rs`, `kdf.rs`, `recovery.rs`, `sign.rs`, `secret.rs` |
   | `encoding/` | `reader.rs`, `cbor.rs`, `padding.rs` |
   | `format/` | `names.rs`, `vault_info.rs`, `slot.rs`, `epoch.rs`, `event.rs`, `snapshot.rs` |
   | `keys/` | key chain and pinning |
@@ -101,7 +101,7 @@ All pure functions with no I/O.
   - one constant per HKDF label (§6.1), plus the slot KEK
   - Argon2id with the parameter bounds, NFC-normalizing the password and zeroizing intermediate values
 - **`aead.rs`:** XChaCha20-Poly1305 seal and open with an explicit AAD. Nonces come from `getrandom`; tests can inject them.
-- **`hpke.rs`:**
+- **`recovery.rs`:**
   - `DeriveKeyPair(R)`, plus seal and open for the recovery suite
   - the recovery anchor computation and its constant-time check
 - **`sign.rs`:** Ed25519 sign with the `"strata v1 signature"` prefix, and strict verification (`verify_strict`).
@@ -114,10 +114,23 @@ All pure functions with no I/O.
 
 - Unit tests per function.
 - **Test vectors** for §14.1 items 1, 2 and 4, and the HPKE and anchor parts of item 3, in `core/strata-core/tests/vectors/*.json`.
-- **Independent cross-check.** `core/tools/vectors/check.py` recomputes every vector with Python `cryptography`, `argon2-cffi` and `cbor2`. CI runs it on Ubuntu. Python isn't installed on the Windows dev machine, so it runs in CI only, unless Python is installed later.
-  - **X-Wing HPKE needs a second implementation that supports KEM `0x647a`.** Finding one is the first task of Phase 1. Candidates are Go's HPKE packages (for example `filippo.io/hpke`) or a Python package, if a maintained one exists. If none fits, cross-check against the draft's published test vectors instead.
+- **Independent cross-check.** `core/tools/vectors/check.py` recomputes every vector with libraries that share no code with the Rust crates: the Python standard library, `argon2-cffi`, PyNaCl (libsodium), `mnemonic`, `cryptography` (OpenSSL ML-KEM and X25519) and `kyber-py`. X-Wing and HPKE are written out from the drafts and first validated against the official IETF vector. Run it with `uv run core/tools/vectors/check.py`; uv supplies Python, so nothing needs installing besides uv. CI runs it too.
+- **The official IETF vector** for the exact HPKE suite (draft-ietf-hpke-pq-04, A.5.1) must be reproduced by both implementations.
 
 **Exit:** the vectors pass in Rust and in Python. Then a **review checkpoint: crypto primitives.**
+
+**Status: done (2026-10-11).**
+
+- **Tests:** 46 Rust tests pass. The frozen vectors in `tests/vectors/` pass the independent Python check (51 checks). Both implementations reproduce the IETF X-Wing vector A.5.1.
+- **Review checkpoint:** a high-effort code review produced 7 findings, and 6 are fixed:
+  - a panic on a malformed recovery public key
+  - HKDF/HMAC state not zeroized (fixed with the `sha2`/`hmac` `zeroize` features)
+  - a buffer reallocation in BIP39 parsing
+  - NFC normalization buffers (avoided entirely for passwords that are already NFC)
+  - missing fuzz targets for `unpad` and `decode_strict`
+  - possible overflow in `padded_len`
+- **Skipped:** copying the file to prepend the signature prefix, because dalek's streaming verifier skips the strict small-order checks.
+- **Rename:** `hpke.rs` from the plan is `recovery.rs`. It also holds the BIP39 code.
 
 ### Phase 2: File formats (M) · spec §5, §6.2, §7.1, §8.1–8.2, §10.1
 

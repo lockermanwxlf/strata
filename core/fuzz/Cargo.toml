@@ -15,10 +15,25 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 strata-core = { path = "../strata-core" }
+minicbor = { version = "2.3.0", features = ["alloc", "derive"] }
 
 [[bin]]
 name = "reader"
 path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "padding"
+path = "fuzz_targets/padding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor"
+path = "fuzz_targets/cbor.rs"
 test = false
 doc = false
 bench = false

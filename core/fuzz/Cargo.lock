@@ -498,6 +498,7 @@ dependencies = [
  "subtle",
  "turboshake",
  "x-wing",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -970,6 +971,7 @@ name = "strata-core-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "minicbor",
  "strata-core",
 ]
 

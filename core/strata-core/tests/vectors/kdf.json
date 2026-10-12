@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "epoch_chain_key": "dee807436b060235207f54158a5e0ea4868092e144feee129e8bcd27b2ac2941",
+      "epoch_key": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "event_key": "d92c6630ae0feea76e3e4f377cce2fb20c77a5f40fa6a1e8eb1cf82006316723",
+      "key_id": "c944c729bcb57939b96174f4a7e3c311763608a9518c058a91efc77661838e3a",
+      "local_state_key": "29a17f0332c652985c56f1bab0cf5da61b9283050fbe43791abb39a4a5dbd0dc",
+      "slot_id": "404142434445464748494a4b4c4d4e4f",
+      "slot_kek": "c2d7f473b11e488e5acaf17ceed713dd5ec43054f129fbbb0e4ba9b942abb031",
+      "slot_secret": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+      "snapshot_key": "884791c67bd5ca7685183269ccf8323bc62428ccdbcaa0d8f5179ed7ea6fa7d7",
+      "vault_id": "000102030405060708090a0b0c0d0e0f"
+    },
+    {
+      "epoch_chain_key": "f3641c4cb73848b073ac59dc9be6a4b655a3f194245ea77ebe8fa5b6b99be531",
+      "epoch_key": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "event_key": "826f308722bca46f2e98429878d208161a1dc1015755ea6c288e6b6d1961ec54",
+      "key_id": "0e3323f1cb29c3662ad267feb14c44d1c06103feb8ea40e92096efea8453c98f",
+      "local_state_key": "a28864a73be08918ea2768e11efaf9a66303e69c3af82d835fdfc719fb1dfb19",
+      "slot_id": "101112131415161718191a1b1c1d1e1f",
+      "slot_kek": "f562aebef2fdebb6660889133ae5be1b15c880dd8deb75d4bf0d7060883203f4",
+      "slot_secret": "7778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f90919293949596",
+      "snapshot_key": "6d6bc3899d5b030cc7626c4ff248b5f1ee8bb44f73234e1c3ae9c413718fe98d",
+      "vault_id": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+    }
+  ],
+  "description": "HKDF-SHA256 subkeys of an epoch key (spec §6.1) and the slot KEK (§6.2)"
+}
