@@ -263,7 +263,7 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
   - validate events, including signatures against the device registry
   - hold events until their causal dependencies arrive, with a warning after 7 days
   - run the retirement check
-  - run the old-epoch rule: accept events from devices known at the rotation, quarantine the rest
+  - flag rather than reject: changes by retired devices after their `last_seq`, and devices registered under an old key after a rotation (suspect), go on a review list (spec §7.2, §9.2)
   - track the applied vector clock and the HWM
 - **Alarms:** rollback, fork, substitution and forgery. After an alarm the device makes no further writes and stays readable from local state.
 - **Client identity:** detect lost or restored local state and generate a new `client_id`.
@@ -274,6 +274,22 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
 - Multi-client simulation: N clients with random edits and random sync schedules converge. This is the convergence property test from Phase 4, run end to end through the file format.
 
 **Exit:** the simulations converge, every adversarial case is caught, and there are no false alarms in honest runs. **M2 needs Phase 6 as well.**
+
+**Status: done (2026-10-12).**
+
+- **Modules:**
+  - `sync/fs_store.rs`: publishes through a hard link from a dot-prefixed temp file, which is atomic and never overwrites. Falls back to `create_new` where hard links aren't supported. Reads are size-capped, paths are confined to the vault, and the directory is fsynced on Unix.
+  - `sync/session.rs`: `Session` with `sync`, `write` and `review`.
+- **The pipeline (spec §9.1):** parse and name check; epoch key, with the event held if the key is unknown; decrypt and validate; causal delivery; device signature (forgery alarm); `prev_hash` (fork alarm); clock and HLC monotonicity.
+- **Detection (spec §9.4):** on every sync each high-water mark is checked against the store (rollback, fork) and against what was applied. Epoch-record signatures are checked once the creator is registered.
+- **Writing:** the seq and the sealed event are persisted as pending before upload, and failed uploads are retried. Stale local state, as after a backup restore, turns the device into a new client.
+- **Design change:** retirement and old-epoch late events are flagged for review rather than ignored or quarantined. Order-dependent rejection broke convergence, and retroactive ignoring broke reduction (spec §9.2 design note, OPEN-14).
+- **Review checkpoint:** a high-effort code review found 4 issues and 3 are fixed:
+  - after a rotation, a session stops writing until it unlocks again (`KeyRotated`), and pending events are re-sealed under the new key
+  - nothing is uploaded after an alarm
+  - the device name is checked up front
+- **Kept as is:** one session per device at a time is documented, for the app layer to enforce.
+- **Tests:** 21 sync tests, covering two devices, restarts on disk, rollback, fork, a reused seq, backup restore, relocated or foreign events, forgery of events and epoch records, held dependencies, retried uploads, review flags, suspect devices, rotation, and a convergence property test through the store.
 
 ### Phase 6: Snapshots, garbage collection and purge (M) · spec §10
 
@@ -298,13 +314,13 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
   - re-wrap this device's local slots, then delete the old slots
 - **Operations built on it:** change password, add slot, remove slot (which always rotates), regenerate recovery key, revoke device (`RetireClient` plus rotation).
 - **Other devices:** after a rotation they fall back to the password once, then re-wrap their local slots silently.
-- **Quarantine UX hooks:** list quarantined events, apply or discard them, and re-issue this device's own quarantined events.
+- **Review UX hooks:** list flagged changes by device (`Session::review`), and revert them as ordinary new ops. Automatic revert is OPEN-14.
 - **Concurrent rotations,** per the OPEN-2 decision.
 
 **Tests:**
 
 - A retired device's events past `last_seq` are rejected.
-- Old-epoch events from a device unknown at the rotation are quarantined.
+- Old-epoch events from a device unknown at the rotation mark it suspect, and its changes are flagged.
 - A revoked device can't read new events.
 - A replayed old password slot doesn't open the current epoch.
 - An offline device that was known at the rotation and not revoked has its late events accepted.
@@ -331,7 +347,7 @@ The API is coarse-grained, as CLAUDE.md requires:
 - **Changes and status:**
   - `apply(EditBatch)`
   - `sync() -> SyncReport`
-  - `status() -> VaultStatus`, which covers alarms, conflicts, unanswered deletes and quarantine
+  - `status() -> VaultStatus`, which covers alarms, conflicts, unanswered deletes, flagged changes and "key rotated, unlock again"
 - **Key management:** `password_strength(bytes)`, `slots()`, `add_slot`, `remove_slot`, `change_password`, `regenerate_recovery_key`, `revoke_device`.
 
 Implementation notes:
@@ -355,7 +371,7 @@ Implementation notes:
   - secret-conflict resolution (show the candidates, pick one or enter a new value)
   - "deleted on another device: keep or delete?"
   - the alarm screen
-- **M3 screens:** slot management, change password, recovery-key regeneration, revoke device, quarantine review.
+- **M3 screens:** slot management, change password, recovery-key regeneration, revoke device, review of flagged changes.
 - **Android:** reuse the shared UI. Release builds keep `FLAG_SECURE`, and the recovery-key screen especially needs it.
 - **Key fingerprint:** if OPEN-6 is approved, show the key-ID fingerprint at enrollment.
 

@@ -14,7 +14,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 - **An attacker who controls the remote storage.** They can read, delete, reorder and replay files, roll them back to older versions, and write arbitrary files. They learn only the metadata listed in §13 and cannot read or forge vault contents. Rollback, forks, replays and slot substitution are detected on any device that has synced before.
 - **An attacker who steals a locked device.** Local slots are bound to hardware keystores, and local state is encrypted.
-- **A revoked device** (one that once unlocked the vault). After key rotation (§7) it cannot read or write new data. It keeps everything it already had.
+- **A revoked device** (one that once unlocked the vault). After key rotation (§7) it cannot read new data. It keeps everything it already had. Anything it still writes with an old key is signed, attributed to it, and flagged for review and one-click revert (§9.2). It is not silently dropped: see the design note in §9.2 for why.
 - **One device impersonating another.** Every device signs what it writes with its own key (§6.4). Even a device holding the vault key cannot forge another device's events, so every change is attributable to a device.
 
 **Does not protect against:**
@@ -274,13 +274,10 @@ signature = Ed25519-Sign(dev_sk, "strata v1 signature" || every byte of the file
 
 An AEAD-valid file whose signature fails verification is **rejected and raises a forgery alarm** (§9.4). Only a vault-key holder can produce such a file, so it means a device is misbehaving.
 
-**Retired devices.** After `RetireClient(c, last_seq)`, a signature from `c` is accepted only on:
+**Retired devices.** After `RetireClient(c, last_seq)`:
 
-- events with `s <= last_seq`
-- snapshots whose `watermark[c] <= last_seq`
-- epoch records whose `cutover[c] <= last_seq`
-
-Anything else signed by `c` is rejected.
+- Events from `c` with `s > last_seq` are applied and merged like any other. Their changes are flagged for review (§9.2).
+- A snapshot signed by `c` is accepted only if `watermark[c] <= last_seq`, and an epoch record signed by `c` only if `cutover[c] <= last_seq`. Anything else they sign is rejected.
 
 ## 7. Epochs and rotation
 
@@ -326,10 +323,14 @@ Steps 2 and 3 complete before step 4, so a crash part-way through leaves the vau
 
 **Rotation never wraps the new key under an old one.** Otherwise a revoked holder of `EK_e` could follow the chain forward. The result is that other devices' local slots, which wrap `EK_e`, now open only the old epoch. Those devices fall back to a synced protector (the password) once, then re-wrap their local slots. The core can do that re-wrap in the same session without another biometric prompt.
 
+Until a device holds the newest epoch's key it MUST NOT write. Anything written under an old key is readable by every holder of that key, which after a revocation includes the revoked device. A device that sees a newer epoch record than it can open stops writing and asks for a synced protector (the password) again. It keeps reading.
+
 **Late events from an old epoch.** These are legitimate when a device was offline during a rotation and wrote events under the key it had. Take an event `(c, s)` in epoch `e' < current`:
 
-- **`c` appears in `cutover_{e'+1}`** (the device was known when the rotation happened): accept it as usual. Its signature (§6.4) proves it came from `c` and not from some other holder of `EK_{e'}`. A revoked device is handled by its `RetireClient`.
-- **`c` doesn't appear:** **quarantine** the event. It isn't merged, and the user is asked whether to apply it. This catches a revoked device that registers a new identity under an old key. An honest device that joined just before the rotation and finds its own events quarantined re-issues their ops as new events in the current epoch.
+The event is applied like any other: its signature (§6.4) proves which device wrote it, and the merge can't treat it specially without letting devices disagree (§9.2). What depends on the epoch record is how it is flagged:
+
+- **`c` appears in `cutover_{e'+1}`** (the device was known when the rotation happened): nothing to flag, unless `c` has since been retired.
+- **`c` doesn't appear:** the device registered under an old key after the rotation. That is how a revoked device holding the old key would invent a new identity, so the device is marked **suspect** in the device list, and its changes are flagged for review.
 
 Concurrent rotations, meaning two records for the same epoch: OPEN-2.
 
@@ -417,7 +418,7 @@ For each new event file, in any order, a reader:
    - The predecessor `(c, s-1)` is available and either its vector clock is not componentwise ≤ this event's, or its HLC is not lower.
    - `prev_hash` doesn't match the predecessor's file hash. When the predecessor has been compacted, the snapshot's watermark hash is used instead (§10.1).
 5. **Holds** the event until every event its vector clock names has been applied or is covered by a snapshot (causal delivery). An event held longer than 7 days raises a warning.
-6. Runs the old-epoch check (§7.2) and the retirement check: reject `(c, s)` when `RetireClient(c, last_seq)` exists and `s > last_seq`.
+6. Doesn't reject events for retirement or for arriving late in an old epoch. Whether a device has seen a `RetireClient` or a newer epoch record yet depends on sync order, so rejecting here would let devices disagree. Those events are flagged for review instead (§7.2, §9.2).
 7. Applies the event by adding its ops to the op set. The device's **applied vector clock** maps each client to the highest contiguous seq it has applied.
 
 ### 9.2 Merge semantics
@@ -457,8 +458,11 @@ The vault's state is a pure function of the **set** of applied ops. Arrival orde
 - `dev_pk` comes from its `RegisterDevice`.
 - Its name is the name in the latest of its `RegisterDevice` and `SetDeviceName` ops. A client's own events are totally ordered, so "latest" is well defined.
 - It is **retired** iff some `RetireClient(c, …)` exists. If there are several, the lowest `last_seq` applies.
+- **Changes flagged for review:** the ops of a retired client with `seq > last_seq`, and every op of a suspect device (§7.2). The UI lists them by device and offers to revert them, which writes ordinary new ops restoring the values they replaced. Flagging never changes what the merge computes.
 
 The UI shows the registry as the device list, and attributes changes to devices through each op's dot.
+
+> **Design note: why retirement isn't retroactive.** Ignoring a retired device's later ops inside the merge looks safer, but it breaks reduction. A device may already have dropped an op because the retired device's later op superseded it (§9.3). Once that later op is ignored, the dropped op is gone for good. Avoiding that would need every compaction to wait until all devices have seen everything, and devices joining mid-way would still leave gaps. Flag-and-revert keeps the merge order-independent and compaction always safe. Rotation already stops a revoked device from reading anything new, and every change it makes is signed and attributed. Automatic revert is OPEN-14.
 
 ### 9.3 Reduction (which ops may be dropped)
 
@@ -575,7 +579,6 @@ The layout is implementation-defined. Local state is never shared, so it isn't p
 - the HWM table
 - the applied vector clock
 - the local op set or cache
-- quarantined events
 - pending outgoing events
 
 Any decrypted cache of vault contents MUST live only inside this record.
@@ -642,8 +645,8 @@ Each of these MUST fail loudly:
 | | recovery slot with its `anchor_epoch` or `anchor_tag` altered | anchor check fails |
 | Replayed events | event copied to another seq | rejected |
 | | old event re-uploaded after GC | ignored, state unchanged |
-| | event from a retired client with `s > last_seq` | rejected |
-| | old-epoch event from a client not in the cutover | quarantined |
+| | event from a retired client with `s > last_seq` | merged, flagged for review |
+| | old-epoch event from a client not in the cutover | merged, device marked suspect |
 | | old-epoch event from a known client, after the rotation | accepted (signature verified) |
 | Forgery | AEAD-valid event with a bad signature | forgery alarm |
 | | event for client `c` signed with another device's key | forgery alarm |
@@ -663,13 +666,14 @@ Each of these MUST fail loudly:
 4. **FIDO2.** RP ID, whether user verification is required, and whether to require a resident (discoverable) credential.
 5. ~~Strength thresholds.~~ **Resolved 2026-10-11:** passwords of any strength may sync. The UI warns and requires confirmation below about 10^10 estimated guesses (§6.2). PINs remain local-only.
 6. **TOFU fingerprint.** Should a short `key_id` fingerprint be shown so the user can compare it across devices on first enrollment?
-7. ~~Per-device signing keys.~~ **Resolved 2026-10-11:** every device signs its events, snapshots and epoch records with Ed25519 (§6.4). This also lets offline devices' late old-epoch events through without quarantine (§7.2).
+7. ~~Per-device signing keys.~~ **Resolved 2026-10-11:** every device signs its events, snapshots and epoch records with Ed25519 (§6.4). Late old-epoch events are attributed to their device, and only flagged when that device is retired or suspect (§7.2).
 8. ~~Forward compatibility.~~ **Resolved 2026-10-11:** strict. A newer version reports "update required" rather than an alarm (§12).
 9. **Garbage collection.** Is 30 days the right grace period, and should GC be automatic or user-triggered?
 10. **Purge details.** Ordering and crash safety of "write snapshot, delete everything else, rotate".
 11. ~~CBOR crate choice.~~ **Resolved 2026-10-11:** `minicbor`. The re-encode check (§4) is still mandatory.
 12. **Attachments.** Out of scope for v1. The 1 MiB body limit excludes them.
 13. **Hardware-backed device keys.** `dev_sk` is a software key in encrypted local state. Platform keystores that can do Ed25519 could hold it instead, and so could Android Keystore on newer API levels. That's a later improvement, and it doesn't change the format.
+14. **Automatic revert.** When a device learns of a retirement or a suspect device, it could revert the flagged changes itself instead of waiting for the user. Concurrent reverts by several devices write the same values, so they need to be harmless (identical values shouldn't show as a conflict). That would make revocation self-cleaning.
 
 ## 16. References
 

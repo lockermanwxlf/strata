@@ -31,6 +31,11 @@ pub enum CoreError {
     #[error("the vault is locked")]
     Locked,
 
+    /// Another device rotated the vault key and this device doesn't hold the new
+    /// one yet. Unlocking again with the password or recovery key catches it up.
+    #[error("the vault's key was changed on another device; unlock again to keep editing")]
+    KeyRotated,
+
     /// No slot opened with the password or recovery key given.
     #[error("that password or recovery key doesn't unlock this vault")]
     WrongCredential,

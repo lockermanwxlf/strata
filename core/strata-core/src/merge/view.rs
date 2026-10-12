@@ -141,35 +141,38 @@ fn resolve_field<'a>(writes: &[&'a OpRecord]) -> Option<Field<'a>> {
 }
 
 fn devices<'a>(set: &'a OpSet, groups: &Groups<'a>) -> BTreeMap<Id, DeviceView<'a>> {
+    let mut retired: BTreeMap<Id, u64> = BTreeMap::new();
+    for r in set.iter() {
+        if let Op::RetireClient {
+            client_id,
+            last_seq,
+        } = &r.op
+        {
+            let limit = retired.entry(*client_id).or_insert(*last_seq);
+            *limit = (*limit).min(*last_seq);
+        }
+    }
     let mut devices = BTreeMap::new();
+    // Every registered device is listed, retired ones included.
     for r in set.iter() {
         if let Op::RegisterDevice {
-            client_id, dev_pk, ..
+            client_id,
+            dev_pk,
+            name: registered_name,
         } = &r.op
         {
             let name = match groups.latest_name.get(client_id).map(|l| &l.op) {
-                Some(Op::RegisterDevice { name, .. } | Op::SetDeviceName { name }) => name.as_str(),
-                _ => unreachable!("a registered client has a latest name"),
+                Some(Op::SetDeviceName { name } | Op::RegisterDevice { name, .. }) => name.as_str(),
+                _ => registered_name.as_str(),
             };
             devices.insert(
                 *client_id,
                 DeviceView {
                     dev_pk: *dev_pk,
                     name,
-                    retired_after: None,
+                    retired_after: retired.get(client_id).copied(),
                 },
             );
-        }
-    }
-    for r in set.iter() {
-        if let Op::RetireClient {
-            client_id,
-            last_seq,
-        } = &r.op
-            && let Some(device) = devices.get_mut(client_id)
-        {
-            device.retired_after =
-                Some(device.retired_after.map_or(*last_seq, |s| s.min(*last_seq)));
         }
     }
     devices

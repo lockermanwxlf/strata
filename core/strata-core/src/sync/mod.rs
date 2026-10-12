@@ -3,6 +3,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod fs_store;
+pub mod session;
 pub mod store;
 
+pub use fs_store::FsStore;
+pub use session::{Session, SyncReport};
 pub use store::{MemoryStore, RemoteStore};

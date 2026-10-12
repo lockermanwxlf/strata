@@ -41,6 +41,9 @@ pub struct Unlocked {
     pub newer_epoch_unreachable: bool,
     /// Files that failed to parse and were set aside.
     pub rejected_files: Vec<(String, CoreError)>,
+    /// The raw epoch records. The sync session needs their cutover vectors and
+    /// checks their signatures once their creators' keys are known.
+    pub epoch_files: Vec<Vec<u8>>,
 }
 
 pub fn unlock(
@@ -104,13 +107,17 @@ pub fn unlock(
     };
     local.save(&vault_id, &state.seal(current)?)?;
 
+    let newer_epoch_unreachable = records.iter().any(|r| r.epoch > keyring.current());
+    drop(records);
+    drop(slots);
     Ok(Unlocked {
         vault_id,
-        newer_epoch_unreachable: records.iter().any(|r| r.epoch > keyring.current()),
+        newer_epoch_unreachable,
         keyring,
         state,
         new_client,
         rejected_files: rejected,
+        epoch_files: files.epochs.into_iter().map(|(_, bytes)| bytes).collect(),
     })
 }
 
@@ -250,6 +257,7 @@ fn new_client_state(vault_id: Id) -> Result<LocalState> {
             device_seed: DeviceKey::generate()?.seed(),
             next_seq: 1,
             high_water: Vec::new(),
+            pending: Vec::new(),
         },
     })
 }

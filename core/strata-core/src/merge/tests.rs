@@ -570,6 +570,10 @@ enum EditSpec {
     AddTag(usize, usize),
     RemoveTag(usize, usize),
     Rename(u8),
+    Retire {
+        client: usize,
+        last_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -588,6 +592,7 @@ fn edit_spec() -> impl Strategy<Value = EditSpec> {
         1 => (0..2usize, 0..2usize).prop_map(|(e, t)| EditSpec::AddTag(e, t)),
         1 => (0..2usize, 0..2usize).prop_map(|(e, t)| EditSpec::RemoveTag(e, t)),
         1 => any::<u8>().prop_map(EditSpec::Rename),
+        1 => (0..3usize, 0..4u64).prop_map(|(client, last_seq)| EditSpec::Retire { client, last_seq }),
     ]
 }
 
@@ -630,6 +635,10 @@ impl EditSpec {
             },
             EditSpec::Rename(n) => Edit::SetDeviceName {
                 name: format!("device {n}"),
+            },
+            EditSpec::Retire { client, last_seq } => Edit::RetireClient {
+                client_id: CLIENTS[client],
+                last_seq,
             },
         }
     }
@@ -794,4 +803,52 @@ proptest! {
         whole.reduce();
         prop_assert_eq!(&summary(&whole.view()), &expected);
     }
+}
+
+#[test]
+fn a_retired_devices_later_ops_still_merge_the_same_in_any_order() {
+    // Retirement isn't retroactive (spec §9.2): B's write after its last_seq still
+    // counts, and it's flagged for review instead. Either order gives the same vault.
+    let events = || {
+        vec![
+            (
+                A,
+                1,
+                1,
+                vec![(A, 1)],
+                vec![register(A, "A"), set_field(X, "title", Some(b"A"), false)],
+            ),
+            (B, 1, 2, vec![(A, 1), (B, 1)], vec![register(B, "B")]),
+            (
+                B,
+                2,
+                9,
+                vec![(A, 1), (B, 2)],
+                vec![set_field(X, "title", Some(b"B"), false)],
+            ),
+            (
+                A,
+                2,
+                3,
+                vec![(A, 2), (B, 1)],
+                vec![Op::RetireClient {
+                    client_id: B,
+                    last_seq: 1,
+                }],
+            ),
+        ]
+    };
+    let forward = set_of(events());
+    let mut reversed = events();
+    reversed.reverse();
+    let mut backward = set_of(reversed);
+    assert_eq!(summary(&forward.view()), summary(&backward.view()));
+    let view = backward.view();
+    assert_eq!(
+        value(view.entries[&X].fields.get("title")),
+        Some(b"B".to_vec())
+    );
+    assert_eq!(view.devices[&B].retired_after, Some(1));
+    drop(view);
+    assert_reduction_keeps_view(&mut backward);
 }

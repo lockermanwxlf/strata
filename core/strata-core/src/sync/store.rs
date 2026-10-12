@@ -13,6 +13,7 @@ use crate::error::{CoreError, Result};
 
 pub trait RemoteStore: Send + Sync {
     /// Every file in the vault, as `/`-separated paths relative to the vault root.
+    /// Sorted.
     fn list(&self) -> Result<Vec<String>>;
 
     /// Reads `path`, refusing files larger than `max_len` without reading them in

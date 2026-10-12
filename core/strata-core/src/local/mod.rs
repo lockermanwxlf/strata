@@ -49,6 +49,10 @@ pub struct StateRecord {
     pub next_seq: u64,
     /// High-water marks `(client, seq, H(c, seq))`, sorted by client (spec §9.4).
     pub high_water: Vec<(Id, u64, [u8; 32])>,
+    /// Sealed events not yet confirmed in the store (spec §11). Saved before the
+    /// upload, so a failed upload is retried with the same seq instead of leaving
+    /// a gap in this device's chain.
+    pub pending: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -180,7 +184,7 @@ type EncResult<W> = core::result::Result<(), encode::Error<<W as Write>::Error>>
 
 impl<C> Encode<C> for StateRecord {
     fn encode<W: Write>(&self, e: &mut Encoder<W>, _: &mut C) -> EncResult<W> {
-        e.map(3)?
+        e.map(4)?
             .u8(1)?
             .bytes(self.device_seed.expose())?
             .u8(2)?
@@ -190,6 +194,10 @@ impl<C> Encode<C> for StateRecord {
         for (client, seq, hash) in &self.high_water {
             e.array(3)?.bytes(client)?.u64(*seq)?.bytes(hash)?;
         }
+        e.u8(4)?.array(self.pending.len() as u64)?;
+        for event in &self.pending {
+            e.bytes(event)?;
+        }
         Ok(())
     }
 }
@@ -197,7 +205,7 @@ impl<C> Encode<C> for StateRecord {
 impl<'b, C> Decode<'b, C> for StateRecord {
     fn decode(d: &mut Decoder<'b>, _: &mut C) -> core::result::Result<Self, decode::Error> {
         let malformed = || decode::Error::message("malformed state record");
-        if d.map()? != Some(3) || d.u8()? != 1 {
+        if d.map()? != Some(4) || d.u8()? != 1 {
             return Err(malformed());
         }
         let device_seed = SecretKey::from_slice(d.bytes()?).map_err(|_| malformed())?;
@@ -219,10 +227,19 @@ impl<'b, C> Decode<'b, C> for StateRecord {
             let hash = d.bytes()?.try_into().map_err(|_| malformed())?;
             high_water.push((client, seq, hash));
         }
+        if d.u8()? != 4 {
+            return Err(malformed());
+        }
+        let n = d.array()?.ok_or_else(malformed)?;
+        let mut pending = Vec::new();
+        for _ in 0..n {
+            pending.push(d.bytes()?.to_vec());
+        }
         Ok(StateRecord {
             device_seed,
             next_seq,
             high_water,
+            pending,
         })
     }
 }
@@ -355,6 +372,7 @@ mod tests {
                 device_seed: key(7),
                 next_seq: 9,
                 high_water: vec![([1; 16], 4, [8; 32]), ([2; 16], 8, [9; 32])],
+                pending: vec![vec![3; 500]],
             },
         }
     }

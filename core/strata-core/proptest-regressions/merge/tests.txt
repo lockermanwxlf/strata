@@ -6,3 +6,7 @@
 # everyone who runs the test benefits from these saved cases.
 cc 23153b541a54e15e88cbeb09341710f97d94ab1c7e5e070fb628c78cb9c8f999 # shrinks to actions = [Write { client: 0, edits: [Keep(0)] }], mask = 0
 cc 0b52ae6e8ced16356df9bb31241c4cff6a79f2e3e13dd7e6372344c9bd84cec7 # shrinks to actions = [Write { client: 1, edits: [Keep(0)] }, Sync { to: 2, from: 1 }, Reduce { client: 1 }], order = 0
+cc 0d2664ce342b43fb614cd148d1b44790f7ff284f920452c388faeede886ba66c # shrinks to actions = [Write { client: 0, edits: [Retire { client: 0, last_seq: 0 }] }], mask = 0
+cc bccef00d702e1d23845920f03f288235193634fa2950bf2c619f4b4aa475616c # shrinks to actions = [Write { client: 0, edits: [Retire { client: 0, last_seq: 0 }] }, Write { client: 0, edits: [] }, Reduce { client: 0 }], order = 0
+cc 98b2f5b66ad6f79334884e57933e02135282e6047e84681b9714028f1f642647 # shrinks to actions = [Write { client: 1, edits: [Keep(0)] }, Sync { to: 2, from: 1 }, Write { client: 0, edits: [Retire { client: 2, last_seq: 0 }] }, Write { client: 2, edits: [Set { entry: 0, field: 0, value: None, secret: false }] }, Reduce { client: 2 }], order = 0
+cc 1624bb0125af98233a63982a8273e205d1c3bf92da330997f9d30635e9032a22 # shrinks to actions = [Write { client: 2, edits: [Retire { client: 0, last_seq: 0 }] }, Write { client: 0, edits: [] }, Write { client: 0, edits: [] }, Write { client: 2, edits: [Keep(1)] }, Sync { to: 0, from: 2 }, Write { client: 0, edits: [Keep(1)] }], mask = 436246188639755072
