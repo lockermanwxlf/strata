@@ -34,6 +34,8 @@ minicbor = { version = "2.3.0", features = ["alloc", "derive"] }
 # English word list only; we use BIP39's encoding, never its seed derivation.
 bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 zxcvbn = { version = "3.1.1", default-features = false }
+# Entry and device IDs cross the FFI as hex strings.
+hex = "0.4.3"
 
 [dev-dependencies]
 hex = "0.4.3"

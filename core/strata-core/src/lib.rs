@@ -10,9 +10,15 @@
 
 uniffi::setup_scaffolding!();
 
+/// Every heap block is zeroed before it is freed (see `alloc`).
+#[global_allocator]
+static ALLOCATOR: alloc::ZeroizingAlloc = alloc::ZeroizingAlloc;
+
+mod alloc;
 pub mod crypto;
 pub mod encoding;
 pub mod error;
+pub mod ffi;
 pub mod format;
 pub mod keys;
 pub mod local;

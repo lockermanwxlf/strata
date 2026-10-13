@@ -388,6 +388,21 @@ Implementation notes:
 
 **Tests:** `:shared:jvmTest` covers each call against the real library, including checking that revealed `ByteArray`s can be zeroed and that no API returns a secret as a `String`.
 
+**Status: done (2026-10-12).**
+
+- **Rust (`ffi.rs`):**
+  - `create_vault` returns the vault unlocked, with its recovery words.
+  - A `Vault` object offers: `open`, `unlock_password`/`unlock_recovery`, `lock`, `sync` (which also snapshots when due and collects garbage), `status`, `entries`, `entry`, `reveal`/`reveal_conflict`, `apply`, `devices`, `rename_device`, `change_password`, `replace_recovery_key`, `revoke_device`, `rejoin_*`, `purge`, `revert_flagged`.
+  - Free functions: `password_strength`, `new_entry_id`.
+  - Alarms come back as state in `SyncSummary`/`VaultStatus`, not as exceptions, so the vault stays readable.
+- **Session ownership:** the session is generic over how it holds its stores (`SessionOf<R, L>`). `Session<'s>` borrows them as before, and the FFI object owns `Arc`s.
+- **Zeroizing allocator** (`alloc.rs`): every heap block is wiped on free (`memset` plus an optimization barrier, as Linux's `memzero_explicit`). This covers UniFFI's transfer buffers and grown `Vec`s. The release assembly was checked: the `memset` survives.
+- **Kotlin:**
+  - Common API in `Vault.kt`; one implementation in `src/jna/kotlin/NativeVault.kt`, compiled into both JVM targets.
+  - `ByteArray` arguments are wiped after each call.
+  - Blocking core calls run on `Dispatchers.IO` instead of through UniFFI async: an async Rust function that blocks would still block whichever thread polls it.
+- **Deferred to Phase 10** (with the protectors): `unlock_local`, `slots`, `add_slot` and `remove_slot`.
+
 ### Phase 9: UI (L, in stages alongside 5–8)
 
 - **M1 screens:**

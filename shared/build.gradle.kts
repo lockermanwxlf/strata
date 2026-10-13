@@ -70,6 +70,10 @@ val bundleHostNative by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("generated/uniffi/resources"))
 }
 
+// The Kotlin side of the bindings (NativeVault.kt). Like the generated bindings it
+// uses JNA, so it compiles into each JVM-based target rather than into commonMain.
+val jnaSources = layout.projectDirectory.dir("src/jna/kotlin")
+
 kotlin {
     jvm()
 
@@ -98,6 +102,7 @@ kotlin {
             // The bindings use JNA and java.nio, so they compile per JVM-based target
             // rather than in commonMain.
             kotlin.srcDir(generateUniffiKotlin)
+            kotlin.srcDir(jnaSources)
             resources.srcDir(bundleHostNative)
             dependencies {
                 implementation(libs.jna)
@@ -105,6 +110,7 @@ kotlin {
         }
         androidMain {
             kotlin.srcDir(generateUniffiKotlin)
+            kotlin.srcDir(jnaSources)
             dependencies {
                 // The AAR ships libjnidispatch.so for each Android ABI.
                 implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")

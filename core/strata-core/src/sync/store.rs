@@ -38,6 +38,30 @@ pub trait RemoteStore: Send + Sync {
     fn delete(&self, path: &str) -> Result<()>;
 }
 
+/// Delegates through a handle: a session can borrow its store or share it.
+macro_rules! delegate_remote_store {
+    ($($handle:ty),*) => {$(
+        impl<T: RemoteStore + ?Sized> RemoteStore for $handle {
+            fn list(&self) -> Result<Vec<String>> {
+                (**self).list()
+            }
+            fn list_dir(&self, dir: &str) -> Result<Vec<String>> {
+                (**self).list_dir(dir)
+            }
+            fn read(&self, path: &str, max_len: usize) -> Result<Vec<u8>> {
+                (**self).read(path, max_len)
+            }
+            fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+                (**self).create(path, bytes)
+            }
+            fn delete(&self, path: &str) -> Result<()> {
+                (**self).delete(path)
+            }
+        }
+    )*};
+}
+delegate_remote_store!(&T, std::sync::Arc<T>);
+
 /// An in-memory vault directory. Tests use `put` and `remove` to act as an attacker
 /// who controls the storage.
 #[derive(Debug, Default)]

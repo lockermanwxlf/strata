@@ -273,6 +273,21 @@ pub trait LocalStore: Send + Sync {
     fn save(&self, vault_id: &Id, bytes: &[u8]) -> Result<()>;
 }
 
+/// Delegates through a handle: a session can borrow its store or share it.
+macro_rules! delegate_local_store {
+    ($($handle:ty),*) => {$(
+        impl<T: LocalStore + ?Sized> LocalStore for $handle {
+            fn load(&self, vault_id: &Id) -> Result<Option<Vec<u8>>> {
+                (**self).load(vault_id)
+            }
+            fn save(&self, vault_id: &Id, bytes: &[u8]) -> Result<()> {
+                (**self).save(vault_id, bytes)
+            }
+        }
+    )*};
+}
+delegate_local_store!(&T, std::sync::Arc<T>);
+
 /// Local state as files in a directory: `<dir>/<vault_id hex>.state`.
 #[derive(Debug, Clone)]
 pub struct FsLocalStore {

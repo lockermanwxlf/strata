@@ -60,7 +60,7 @@ pub enum CoreError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error, uniffi::Enum)]
 pub enum AlarmKind {
     #[error("rollback: files the vault already had have disappeared or gone back in time")]
     Rollback,

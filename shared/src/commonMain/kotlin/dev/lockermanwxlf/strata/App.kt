@@ -17,7 +17,7 @@ import androidx.compose.ui.unit.dp
 fun App() {
     // runCatching also catches UnsatisfiedLinkError, so a missing native library
     // shows up on screen instead of crashing the app.
-    val core = remember { runCatching { nativeCoreVersion() } }
+    val core = remember { runCatching { StrataCore.version() } }
 
     MaterialTheme {
         Surface(modifier = Modifier.fillMaxSize()) {

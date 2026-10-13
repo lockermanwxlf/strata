@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use super::{Session, Watermark};
+use super::{SessionOf, Watermark};
 use crate::crypto::kdf::{self, Argon2Params, EpochKeys};
 use crate::crypto::recovery::{self, RecoveryKeyPair};
 use crate::crypto::{SecretBytes, SecretKey, fill_random, random_id};
@@ -17,10 +17,12 @@ use crate::format::names::FileName;
 use crate::format::slot::{self, SlotParams};
 use crate::keys::VaultFiles;
 use crate::keys::unlock::{Credential, open_keyring};
+use crate::local::LocalStore;
 use crate::local::Pin;
 use crate::merge::OpSet;
 use crate::merge::edit::Edit;
 use crate::merge::view::{EntryView, Field};
+use crate::sync::RemoteStore;
 
 /// What a rotation does with the recovery key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +56,7 @@ pub struct PurgeReport {
     pub snapshots_left: usize,
 }
 
-impl Session<'_> {
+impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     /// Rotates to a new epoch (spec §7.2). `password` goes into the new epoch's
     /// password slot. It is the new password when this is a password change.
     ///
@@ -78,7 +80,7 @@ impl Session<'_> {
         let ek = SecretKey::generate()?;
         let keys = EpochKeys::derive(&vault_id, &ek);
 
-        let files = VaultFiles::load(self.store)?;
+        let files = VaultFiles::load(&self.store)?;
         let mut set_aside = Vec::new();
         let old_slots: Vec<(String, u32, SlotParams)> = files
             .slots(&mut set_aside)?
@@ -311,7 +313,7 @@ impl Session<'_> {
             .keys(epoch - 1)
             .expect("the keyring holds every epoch below its current one")
             .key_id;
-        let files = VaultFiles::load(self.store)?;
+        let files = VaultFiles::load(&self.store)?;
         let mut set_aside = Vec::new();
         let records = files.epoch_records(&mut set_aside)?;
         let slots = files.slots(&mut set_aside)?;

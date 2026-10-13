@@ -1,0 +1,238 @@
+package dev.lockermanwxlf.strata
+
+/**
+ * The vault API that common (UI) code sees. Platform code implements it on top of the
+ * Rust core's generated bindings.
+ *
+ * Secrets:
+ * - Every `ByteArray` argument (passwords, recovery words, field values) is **wiped**
+ *   (filled with zeros) once the core has its copy, so callers can't forget to.
+ * - Every `ByteArray` returned holds a secret. Wipe it with [wipe] as soon as it has
+ *   been shown or copied.
+ * - Secrets never appear as `String`: summaries and details carry only non-secret
+ *   values, and secret fields are revealed one at a time with [VaultHandle.reveal].
+ *
+ * Suspending calls run on a background dispatcher: unlocking runs Argon2, and
+ * syncing reads and writes the vault folder.
+ */
+interface VaultHandle {
+    /** Answers at once, even while another call is running. */
+    val isLocked: Boolean
+
+    /** Unlocks with the password (UTF-8 bytes), then syncs. */
+    suspend fun unlockPassword(password: ByteArray): SyncSummary
+
+    /** Unlocks with the 24 recovery words as typed (UTF-8 bytes), then syncs. */
+    suspend fun unlockRecovery(words: ByteArray): SyncSummary
+
+    /**
+     * Forgets every key and decrypted value. [isLocked] turns true at once; the keys
+     * go as soon as a call in progress (say a sync) finishes.
+     */
+    suspend fun lock()
+
+    suspend fun sync(): SyncSummary
+    suspend fun status(): VaultStatus
+
+    /** Every entry, trash included. */
+    suspend fun entries(): List<EntrySummary>
+    suspend fun entry(entryId: String): EntryDetail
+
+    /** One field's value. Wipe the result when done. */
+    suspend fun reveal(entryId: String, field: String): ByteArray
+
+    /** Every value of a field in conflict. Wipe the values when done. */
+    suspend fun revealConflict(entryId: String, field: String): List<ConflictCandidate>
+
+    /** Applies the edits as one change. Field values in the edits are wiped. */
+    suspend fun apply(edits: List<EntryEdit>)
+
+    suspend fun devices(): List<DeviceInfo>
+    suspend fun renameDevice(name: String)
+    suspend fun changePassword(newPassword: ByteArray): RotationSummary
+
+    /** Returns the new recovery words; the old ones stop working. Wipe them when shown. */
+    suspend fun replaceRecoveryKey(password: ByteArray): ByteArray
+    suspend fun revokeDevice(clientId: String, password: ByteArray): RotationSummary
+
+    /** After [SyncSummary.lostRotation]: switch to the winning device's key. */
+    suspend fun rejoinPassword(password: ByteArray)
+    suspend fun rejoinRecovery(words: ByteArray)
+
+    /** Removes an entry for good. Rotates the key. */
+    suspend fun purge(entryId: String, password: ByteArray): PurgeSummary
+
+    /** Reverts every change flagged for review; returns how many edits that took. */
+    suspend fun revertFlagged(): Int
+
+    /** Locks and releases the native handle. The handle can't be used afterwards. */
+    fun close()
+}
+
+/** Entry points into the core. */
+object StrataCore {
+    /** Version of the native library, which also confirms it loaded. */
+    fun version(): String = nativeVersion()
+
+    /** Creates a vault in the empty folder [vaultDir] and returns it unlocked. */
+    suspend fun createVault(
+        vaultDir: String,
+        stateDir: String,
+        password: ByteArray,
+        deviceName: String,
+    ): CreatedVault = nativeCreateVault(vaultDir, stateDir, password, deviceName)
+
+    /**
+     * A locked handle on an existing vault. [stateDir] holds this device's local
+     * state; [deviceName] is used if this device joins the vault.
+     */
+    fun openVault(vaultDir: String, stateDir: String, deviceName: String): VaultHandle =
+        nativeOpenVault(vaultDir, stateDir, deviceName)
+
+    /** The weak-password estimate. Advisory: any password is allowed. */
+    suspend fun passwordStrength(password: ByteArray): StrengthEstimate = nativePasswordStrength(password)
+
+    fun newEntryId(): String = nativeNewEntryId()
+}
+
+// Implemented per platform on top of the generated bindings (NativeVault.kt).
+internal expect fun nativeVersion(): String
+
+internal expect suspend fun nativeCreateVault(
+    vaultDir: String,
+    stateDir: String,
+    password: ByteArray,
+    deviceName: String,
+): CreatedVault
+
+internal expect fun nativeOpenVault(vaultDir: String, stateDir: String, deviceName: String): VaultHandle
+
+internal expect suspend fun nativePasswordStrength(password: ByteArray): StrengthEstimate
+
+internal expect fun nativeNewEntryId(): String
+
+/** Overwrites the array with zeros. */
+fun ByteArray.wipe() = fill(0)
+
+/** A new vault, unlocked, and its recovery words: show them once, then wipe them. */
+class CreatedVault(val vault: VaultHandle, val recoveryWords: ByteArray)
+
+enum class Alarm { ROLLBACK, FORK, SLOT_SUBSTITUTION, FORGERY }
+
+data class SyncSummary(
+    val applied: Int,
+    val uploaded: Int,
+    val held: Int,
+    val rejected: Int,
+    val farFuture: Int,
+    /** Another device changed the key: read-only until the next unlock. */
+    val keyRotated: Boolean,
+    /** Another device's concurrent key change won: read-only until a rejoin. */
+    val lostRotation: Boolean,
+    val identityReset: Boolean,
+    val integrityUnverified: Boolean,
+    val snapshotWritten: Boolean,
+    val filesDeleted: Int,
+    /** Alarms are state, not exceptions: the vault stays open to read. */
+    val alarm: Alarm?,
+)
+
+data class VaultStatus(
+    val locked: Boolean,
+    val alarm: Alarm?,
+    val keyRotated: Boolean,
+    val lostRotation: Boolean,
+    val conflicts: Int,
+    val unansweredDeletes: Int,
+    val flaggedChanges: Int,
+    val suspectDevices: Int,
+)
+
+/** One line of the entry list. Holds no secret values. */
+data class EntrySummary(
+    val id: String,
+    val title: String?,
+    val username: String?,
+    val tags: List<String>,
+    val deleted: Boolean,
+    val hasConflict: Boolean,
+    val unansweredDelete: Boolean,
+)
+
+data class EntryDetail(
+    val id: String,
+    val fields: List<FieldInfo>,
+    val tags: List<String>,
+    val deleted: Boolean,
+    val unansweredDelete: Boolean,
+)
+
+data class FieldInfo(
+    val name: String,
+    val secret: Boolean,
+    /** Set only for non-secret fields. Secret ones go through [VaultHandle.reveal]. */
+    val value: String?,
+    /** Concurrent values the field holds; 0 when there's no conflict. */
+    val conflictCandidates: Int,
+)
+
+/** One side of a conflict. [value] is a secret (or `null`: deleted on that side). */
+class ConflictCandidate(val value: ByteArray?, val deviceId: String, val deviceName: String?)
+
+data class DeviceInfo(
+    val clientId: String,
+    val name: String,
+    val thisDevice: Boolean,
+    val retired: Boolean,
+    val suspect: Boolean,
+)
+
+data class RotationSummary(val epoch: Int, val recoveryLost: Boolean)
+
+data class PurgeSummary(
+    val rotation: RotationSummary,
+    val eventsDeleted: Int,
+    val snapshotsDeleted: Int,
+    val eventsLeft: Int,
+    val snapshotsLeft: Int,
+)
+
+data class StrengthEstimate(val guessesLog10: Double, val warn: Boolean)
+
+sealed class EntryEdit {
+    /** Sets a field, or removes it with a `null` value. The value is wiped once applied. */
+    class SetField(
+        val entryId: String,
+        val name: String,
+        val value: ByteArray?,
+        val secret: Boolean = false,
+    ) : EntryEdit()
+
+    class DeleteEntry(val entryId: String) : EntryEdit()
+
+    /** "Keep" after a delete on another device; also restores from the trash. */
+    class KeepEntry(val entryId: String) : EntryEdit()
+
+    class AddTag(val entryId: String, val tag: String) : EntryEdit()
+    class RemoveTag(val entryId: String, val tag: String) : EntryEdit()
+}
+
+/** A failed call. [alarm] is set when [reason] is [Reason.ALARM]. */
+class StrataException(val reason: Reason, message: String, val alarm: Alarm? = null) :
+    Exception(message) {
+    enum class Reason {
+        REJECTED,
+        ALARM,
+        UPDATE_REQUIRED,
+        LOCKED,
+        KEY_ROTATED,
+        CONFLICTING_ROTATION,
+        WRONG_CREDENTIAL,
+        RECOVERY_WORDS,
+        POLICY,
+        RNG,
+        IO,
+        NOT_FOUND,
+        FIELD_CONFLICT,
+    }
+}

@@ -107,9 +107,11 @@ enum Outcome {
     Rejected(CoreError),
 }
 
-pub struct Session<'s> {
-    store: &'s dyn RemoteStore,
-    local: &'s dyn LocalStore,
+/// A sync session over stores held as `R` and `L`: borrowed (`Session`), or shared
+/// through `Arc` where the session has to own them (the FFI).
+pub struct SessionOf<R, L> {
+    store: R,
+    local: L,
     vault_id: Id,
     keyring: Keyring,
     /// Epoch records by path, refreshed on every sync.
@@ -139,19 +141,17 @@ pub struct Session<'s> {
     lost_rotation: bool,
 }
 
-impl<'s> Session<'s> {
+/// The usual session, borrowing its stores.
+pub type Session<'s> = SessionOf<&'s dyn RemoteStore, &'s dyn LocalStore>;
+
+impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     /// A session for an unlocked vault. `device_name` is used if this device still
     /// has to register (its first event), so it's checked now rather than at the
     /// first write. Call `sync` next.
     ///
     /// One session per device at a time: two sessions sharing local state would
     /// both use the same next seq, and the second upload would look like a fork.
-    pub fn new(
-        store: &'s dyn RemoteStore,
-        local: &'s dyn LocalStore,
-        unlocked: Unlocked,
-        device_name: &str,
-    ) -> Result<Self> {
+    pub fn new(store: R, local: L, unlocked: Unlocked, device_name: &str) -> Result<Self> {
         Op::SetDeviceName {
             name: device_name.to_string(),
         }
@@ -183,6 +183,12 @@ impl<'s> Session<'s> {
     /// no writing until it unlocks again (spec §7.2).
     pub fn key_rotated(&self) -> bool {
         self.rotated_away
+    }
+
+    /// Another device's key won a concurrent rotation: no writing until `rejoin`
+    /// (spec §7.2).
+    pub fn lost_rotation(&self) -> bool {
+        self.lost_rotation
     }
 
     pub fn client_id(&self) -> Id {
@@ -786,6 +792,9 @@ impl<'s> Session<'s> {
             })
             .copied()
             .collect();
+        if ripe.is_empty() {
+            return Ok(report); // nothing to act on, so no need to list the store
+        }
         ripe.sort_by_key(|&(_, created)| std::cmp::Reverse(created));
         let paths = self.store.list()?;
         for (id, _) in ripe {

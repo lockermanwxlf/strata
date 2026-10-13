@@ -4,13 +4,13 @@ Cross-platform password vault. Targets: Windows 11, macOS, Linux, Android. iOS i
 
 ## Architecture
 
-- **`core/strata-core` (Rust):** everything security-critical: vault format, crypto, CRDT merge, sync, slot policy. Secrets live in Rust memory and are wiped with `zeroize`.
+- **`core/strata-core` (Rust):** everything security-critical: vault format, crypto, CRDT merge, sync, slot policy. Secrets live in Rust memory and are wiped with `zeroize`. The core's global allocator (`alloc.rs`) also zeroes every heap block on free, which covers copies `zeroize` can't reach: grown `Vec`s and UniFFI's transfer buffers.
 - **UniFFI** generates the Kotlin bindings (`dev.lockermanwxlf.strata.core.ffi`) from the built library. Never edit generated code. Change the Rust and rebuild.
-- **`shared` (Kotlin Multiplatform + Compose Multiplatform):** UI in `commonMain`. Bindings compile into `jvmMain` and `androidMain` (they use JNA). Common code reaches the core through `expect` declarations in `NativeCore.kt`.
+- **`shared` (Kotlin Multiplatform + Compose Multiplatform):** UI in `commonMain`. Common code uses the platform-neutral API in `commonMain/.../Vault.kt` (`StrataCore`, `VaultHandle`). Its one implementation, `src/jna/kotlin/.../NativeVault.kt`, compiles into both `jvmMain` and `androidMain` together with the generated bindings (they use JNA), and runs every call on `Dispatchers.IO`.
 - **`desktopApp`:** Compose Desktop entry point and packaging (jpackage).
 - **`androidApp`:** Android entry point. AGP 9 forbids an application module from also being a KMP module, which is why it's separate. It cross-compiles the core with cargo-ndk into jniLibs.
 
-Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync". Never make one call per field.
+Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync". Never make one call per field. The surface is `ffi.rs`: one `Vault` object per open vault. Secrets cross only as `ByteArray`, revealed one value at a time, and the Kotlin wrapper wipes every `ByteArray` argument once the core has it.
 
 ## Key hierarchy (LUKS / age style)
 
