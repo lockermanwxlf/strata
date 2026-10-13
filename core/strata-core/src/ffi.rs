@@ -85,6 +85,7 @@ impl From<ProtectorError> for VaultError {
                 VaultError::ProtectorUnavailable { detail: reason }
             }
             ProtectorError::Platform { detail } => VaultError::ProtectorUnavailable { detail },
+            ProtectorError::WrongPin => VaultError::WrongCredential,
         }
     }
 }

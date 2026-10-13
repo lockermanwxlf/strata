@@ -157,11 +157,21 @@ fun UnlockScreen(c: VaultController) {
             ) { Text("Unlock") }
             val device = c.deviceProtector
             if (device != null && c.deviceUnlockEnabled) {
-                OutlinedButton(
-                    enabled = !c.busy,
-                    onClick = { c.unlockWithDevice() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Unlock with ${device.label}") }
+                if (device.needsPin) {
+                    val pin = rememberTextFieldState()
+                    PasswordField(pin, "Or the PIN")
+                    OutlinedButton(
+                        enabled = !pin.isEmpty && !c.busy,
+                        onClick = { c.unlockWithDevice(pin.takeUtf8()) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Unlock with the PIN") }
+                } else {
+                    OutlinedButton(
+                        enabled = !c.busy,
+                        onClick = { c.unlockWithDevice() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Unlock with ${device.label}") }
+                }
             }
             TextButton(onClick = { useWords = true }) { Text("Use the recovery words instead") }
         } else {

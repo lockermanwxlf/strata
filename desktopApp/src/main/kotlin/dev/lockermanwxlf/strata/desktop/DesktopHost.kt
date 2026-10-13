@@ -60,8 +60,8 @@ class DesktopHost : AppHost {
 
     override fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
 
-    /** Windows Hello when it's set up; checked once, on first use. */
-    override val deviceProtector: DeviceProtector? by lazy { StrataCore.windowsHello() }
+    /** This computer's device unlock, if any; checked once, on first use. */
+    override val deviceProtector: DeviceProtector? by lazy { StrataCore.desktopProtector() }
 
     override val clipboard: SecretClipboard = AwtClipboard()
 

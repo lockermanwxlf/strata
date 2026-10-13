@@ -459,7 +459,17 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 
 **Tests:** in-process fake protectors cover the core logic: `KeyInvalidated` meaning "slot gone", user cancellation, and capability reporting. Each real protector also gets a manual test checklist.
 
-**Status: stage A done (2026-10-13). Linux, macOS and the FIDO2 spike are stage B.**
+**Status: stages A and B done (2026-10-13), except FIDO2, which waits on a domain for its RP ID (OPEN-4).**
+
+- **Stage B:**
+  - Linux TPM 2.0 (`tss-esapi`, protector 4): each slot secret is sealed under the PIN's hash, beneath a P-256 storage key the TPM re-derives from a fixed template. Wrong PINs count towards the TPM's lockout.
+  - Linux Secret Service (`keyring` 3, protector 5): one app key in the desktop keyring. It counts as Strong, not rate-limited, so PIN slots are refused there.
+  - macOS Secure Enclave (`security-framework`, protector 3): ECIES to an enclave P-256 key, with the slot ID prefixed to the plaintext. It lints against `aarch64-apple-darwin`, but hasn't run on a Mac.
+  - Kotlin: `StrataCore.desktopProtector()` picks the protector per OS. The TPM path asks for a PIN in the app (entered twice when turning it on).
+  - Tests: `core/tools/linux-protectors.sh` starts a software TPM and a throwaway keyring, then runs clippy and the whole suite. It runs in WSL and in the Ubuntu CI job.
+  - FIDO2 spike: `docs/research/fido2.md`.
+
+**Stage A:**
 
 - **Core:**
   - `Credential::LocalSlot` unlocks from a kind-4 slot.

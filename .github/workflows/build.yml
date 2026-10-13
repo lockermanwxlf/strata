@@ -26,12 +26,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core
+      # Linux also gets a software TPM and a keyring daemon, so the Linux platform
+      # protectors are tested against real services (core/tools/linux-protectors.sh).
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config swtpm swtpm-tools gnome-keyring dbus-x11
       - working-directory: core
         run: cargo fmt --check
       - working-directory: core
         run: cargo clippy --all-targets -- -D warnings
-      - working-directory: core
+      - if: runner.os != 'Linux'
+        working-directory: core
         run: cargo test
+      - if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/core/target
+        run: bash core/tools/linux-protectors.sh
 
   deny:
     name: Rust dependency licenses and advisories
@@ -56,6 +65,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      # The Linux platform protectors link the TPM software stack and D-Bus.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core/fuzz
@@ -82,6 +94,9 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: dtolnay/rust-toolchain@stable
+      # The Linux platform protectors link the TPM software stack and D-Bus.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core

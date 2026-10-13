@@ -46,3 +46,11 @@ unicode-normalization = "0.1.25"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.62.2", features = ["Foundation", "Security_Credentials", "Security_Cryptography", "Storage_Streams", "Win32_Foundation", "Win32_System_TpmBaseServices", "Win32_UI_WindowsAndMessaging", "Win32_System_WinRT"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+tss-esapi = "7.7.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7.0", features = ["OSX_10_15"] }
+security-framework-sys = "2.17.0"

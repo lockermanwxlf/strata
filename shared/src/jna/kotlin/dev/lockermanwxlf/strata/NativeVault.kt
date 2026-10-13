@@ -20,6 +20,10 @@ import dev.lockermanwxlf.strata.core.ffi.defaultStateDir as ffiDefaultStateDir
 import dev.lockermanwxlf.strata.core.ffi.generatePassword as ffiGeneratePassword
 import dev.lockermanwxlf.strata.core.ffi.newEntryId as ffiNewEntryId
 import dev.lockermanwxlf.strata.core.ffi.passwordStrength as ffiPasswordStrength
+import dev.lockermanwxlf.strata.core.ffi.linuxSecretService as ffiLinuxSecretService
+import dev.lockermanwxlf.strata.core.ffi.linuxTpm as ffiLinuxTpm
+import dev.lockermanwxlf.strata.core.ffi.linuxTpmAvailable as ffiLinuxTpmAvailable
+import dev.lockermanwxlf.strata.core.ffi.secureEnclave as ffiSecureEnclave
 import dev.lockermanwxlf.strata.core.ffi.windowsHello as ffiWindowsHello
 
 internal actual fun nativeVersion(): String = coreVersion()
@@ -52,21 +56,39 @@ internal actual fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteA
 
 internal actual fun nativeDefaultStateDir(): String? = ffiDefaultStateDir()
 
-internal actual fun nativeWindowsHello(): DeviceProtector? =
+internal actual fun nativeDesktopProtector(): DeviceProtector? =
     ffiWindowsHello()?.let { NativeProtector(DeviceProtector.WINDOWS_HELLO, "Windows Hello", it) }
+        ?: ffiSecureEnclave()?.let { NativeProtector(DeviceProtector.SECURE_ENCLAVE, "Touch ID or your login password", it) }
+        ?: if (ffiLinuxTpmAvailable()) {
+            NativeProtector(DeviceProtector.TPM, "a TPM PIN", null) { pin -> ffiLinuxTpm(pin) }
+        } else {
+            ffiLinuxSecretService()?.let { NativeProtector(DeviceProtector.SECRET_SERVICE, "your desktop keyring", it) }
+        }
 
 /** Wraps a platform protector (Kotlin on Android, Rust on desktop) for common code. */
 fun deviceProtector(id: Int, label: String, protector: PlatformProtector): DeviceProtector =
     NativeProtector(id, label, protector)
 
+/** A protector, or for one that takes a PIN, the way to make one from it. */
 private class NativeProtector(
     override val id: Int,
     override val label: String,
-    val protector: PlatformProtector,
-) : DeviceProtector
+    private val protector: PlatformProtector?,
+    private val withPin: ((ByteArray) -> PlatformProtector?)? = null,
+) : DeviceProtector {
+    override val needsPin: Boolean get() = withPin != null
 
-private fun DeviceProtector.native(): PlatformProtector =
-    (this as? NativeProtector)?.protector ?: error("not a protector from deviceProtector()")
+    /** The protector for one call. A PIN is wiped once the core has its copy. */
+    fun resolve(pin: ByteArray?): PlatformProtector {
+        protector?.let { return it }
+        val p = pin ?: throw StrataException(Reason.REJECTED, "a PIN is needed")
+        return consuming(p) { withPin!!(p) }
+            ?: throw StrataException(Reason.PROTECTOR_UNAVAILABLE, "device unlock unavailable: no TPM")
+    }
+}
+
+private fun DeviceProtector.native(pin: ByteArray?): PlatformProtector =
+    (this as? NativeProtector)?.resolve(pin) ?: error("not a protector from deviceProtector()")
 
 private class NativeVault(private val vault: Vault) : VaultHandle {
     override val isLocked: Boolean
@@ -179,12 +201,12 @@ private class NativeVault(private val vault: Vault) : VaultHandle {
 
     override suspend fun localUnlocks() = background { vault.localUnlocks().map { it.toInt() and 0xff } }
 
-    override suspend fun unlockLocal(protector: DeviceProtector) = backgroundSuspend {
-        vault.unlockLocal(protector.native(), protector.id.toUByte()).common()
+    override suspend fun unlockLocal(protector: DeviceProtector, pin: ByteArray?) = backgroundSuspend {
+        vault.unlockLocal(protector.native(pin), protector.id.toUByte()).common()
     }
 
-    override suspend fun enableLocalUnlock(protector: DeviceProtector) = backgroundSuspend {
-        vault.enableLocalUnlock(protector.native(), protector.id.toUByte())
+    override suspend fun enableLocalUnlock(protector: DeviceProtector, pin: ByteArray?) = backgroundSuspend {
+        vault.enableLocalUnlock(protector.native(pin), protector.id.toUByte())
     }
 
     override suspend fun disableLocalUnlock(protectorId: Int) = background {

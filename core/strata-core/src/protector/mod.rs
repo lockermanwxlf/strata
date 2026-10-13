@@ -21,6 +21,10 @@
 
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows_hello;
 
@@ -48,6 +52,9 @@ pub enum ProtectorError {
     KeyInvalidated,
     #[error("protector unavailable: {reason}")]
     Unavailable { reason: String },
+    /// A PIN the protector checks itself (a TPM PIN) was wrong.
+    #[error("wrong PIN")]
+    WrongPin,
     #[error("platform error: {detail}")]
     /// Not `message`: that would clash with `Throwable.message` in the generated Kotlin.
     Platform { detail: String },
@@ -88,6 +95,62 @@ pub fn windows_hello() -> Option<Arc<dyn PlatformProtector>> {
         windows_hello::WindowsHello::new().map(|h| Arc::new(h) as Arc<dyn PlatformProtector>)
     }
     #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Whether a TPM 2.0 is reachable here (Linux), for offering TPM unlock.
+#[uniffi::export]
+pub fn linux_tpm_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::Tpm::available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// The TPM with `pin` (`protector_id` 4), for one enable or unlock. A wrong PIN fails
+/// with `WrongPin`, and the TPM's lockout limits retries. `None` without a TPM.
+#[uniffi::export]
+pub fn linux_tpm(pin: Vec<u8>) -> Option<Arc<dyn PlatformProtector>> {
+    let pin = zeroize::Zeroizing::new(pin);
+    #[cfg(target_os = "linux")]
+    {
+        linux::Tpm::with_pin(&pin).map(|t| Arc::new(t) as Arc<dyn PlatformProtector>)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        drop(pin);
+        None
+    }
+}
+
+/// The desktop keyring through Secret Service (`protector_id` 5), if a daemon answers.
+#[uniffi::export]
+pub fn linux_secret_service() -> Option<Arc<dyn PlatformProtector>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::SecretService::new().map(|s| Arc::new(s) as Arc<dyn PlatformProtector>)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// The Secure Enclave (`protector_id` 3) on macOS. Needs a signed app with a keychain
+/// access group; otherwise turning it on fails with `ProtectorUnavailable`.
+#[uniffi::export]
+pub fn secure_enclave() -> Option<Arc<dyn PlatformProtector>> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(Arc::new(macos::SecureEnclave) as Arc<dyn PlatformProtector>)
+    }
+    #[cfg(not(target_os = "macos"))]
     {
         None
     }

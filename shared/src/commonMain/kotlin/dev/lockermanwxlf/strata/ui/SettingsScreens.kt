@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.input.rememberTextFieldState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
@@ -32,6 +33,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SettingsScreen(c: VaultController) {
     var newRecovery by remember { mutableStateOf(false) }
+    var choosingPin by remember { mutableStateOf(false) }
     val status = c.status
     ScreenFrame("Settings", onBack = { c.back() }) {
         c.folder?.let { Hint("Vault folder: $it") }
@@ -63,9 +65,15 @@ fun SettingsScreen(c: VaultController) {
                 Switch(
                     checked = c.deviceUnlockEnabled,
                     enabled = !c.busy,
-                    onCheckedChange = { c.setDeviceUnlock(it) },
+                    onCheckedChange = { on ->
+                        if (on && device.needsPin) choosingPin = true else c.setDeviceUnlock(on)
+                    },
                 )
             }
+        }
+        if (choosingPin) PinDialog(onDismiss = { choosingPin = false }) {
+            choosingPin = false
+            c.setDeviceUnlock(true, it)
         }
         HorizontalDivider()
         SectionTitle("Vault")
@@ -235,3 +243,39 @@ private fun alarmText(alarm: Alarm) = when (alarm) {
         "get your devices to encrypt under a key they know."
     Alarm.FORGERY -> "A file carries a signature that doesn't match the device it claims to come from."
 }
+
+/** The PIN for a TPM-backed unlock, typed twice. The TPM locks out repeated wrong guesses. */
+@Composable
+private fun PinDialog(onDismiss: () -> Unit, onConfirm: (ByteArray) -> Unit) {
+    val pin = rememberTextFieldState()
+    val repeat = rememberTextFieldState()
+    var problem by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose a PIN") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("The TPM in this computer keeps the key, and locks out repeated wrong PINs.")
+                PasswordField(pin, "PIN")
+                PasswordField(repeat, "Repeat the PIN")
+                problem?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                problem = when {
+                    pin.text.length < MIN_PIN_LENGTH -> "Use at least $MIN_PIN_LENGTH characters."
+                    !pin.sameTextAs(repeat) -> "The PINs don't match."
+                    else -> null
+                }
+                if (problem == null) {
+                    repeat.takeUtf8().fill(0)
+                    onConfirm(pin.takeUtf8())
+                }
+            }) { Text("Turn on") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+private const val MIN_PIN_LENGTH = 4

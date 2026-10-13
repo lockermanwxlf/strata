@@ -167,12 +167,15 @@ class VaultController(
         deviceUnlockEnabled = p != null && attempt { vault?.localUnlocks() }.orEmpty().contains(p.id)
     }
 
-    /** Unlocks with [deviceProtector]. A dismissed prompt just returns to the unlock screen. */
-    fun unlockWithDevice() = perform {
+    /**
+     * Unlocks with [deviceProtector], passing [pin] (wiped) when it needs one. A
+     * dismissed prompt just returns to the unlock screen.
+     */
+    fun unlockWithDevice(pin: ByteArray? = null) = perform {
         val v = vault ?: return@perform
         val p = deviceProtector ?: return@perform
         try {
-            afterSync(v.unlockLocal(p))
+            afterSync(v.unlockLocal(p, pin))
         } catch (e: StrataException) {
             if (e.reason == StrataException.Reason.KEY_INVALIDATED) deviceUnlockEnabled = false
             throw e
@@ -182,11 +185,11 @@ class VaultController(
         reset(Screen.Entries)
     }
 
-    /** Turns device unlock on (one prompt) or off for this vault on this device. */
-    fun setDeviceUnlock(enabled: Boolean) = perform {
+    /** Turns device unlock on (one prompt, or [pin]) or off for this vault on this device. */
+    fun setDeviceUnlock(enabled: Boolean, pin: ByteArray? = null) = perform {
         val v = vault ?: return@perform
         val p = deviceProtector ?: return@perform
-        if (enabled) v.enableLocalUnlock(p) else v.disableLocalUnlock(p.id)
+        if (enabled) v.enableLocalUnlock(p, pin) else v.disableLocalUnlock(p.id)
         refreshDeviceUnlock()
     }
 

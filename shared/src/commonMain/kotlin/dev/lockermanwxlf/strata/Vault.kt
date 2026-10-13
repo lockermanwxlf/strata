@@ -73,10 +73,13 @@ interface VaultHandle {
      * [StrataException.Reason.KEY_INVALIDATED] if the platform key is gone: unlock
      * with the password instead, which also removes the dead slot.
      */
-    suspend fun unlockLocal(protector: DeviceProtector): SyncSummary
+    suspend fun unlockLocal(protector: DeviceProtector, pin: ByteArray? = null): SyncSummary
 
-    /** Lets [protector] unlock this device from now on. Prompts once. */
-    suspend fun enableLocalUnlock(protector: DeviceProtector)
+    /**
+     * Lets [protector] unlock this device from now on. Prompts once, or takes [pin]
+     * when [DeviceProtector.needsPin]. The PIN is wiped.
+     */
+    suspend fun enableLocalUnlock(protector: DeviceProtector, pin: ByteArray? = null)
 
     suspend fun disableLocalUnlock(protectorId: Int)
 
@@ -115,8 +118,11 @@ object StrataCore {
     /** The usual folder for this device's local state on desktop systems. */
     fun defaultStateDir(): String? = nativeDefaultStateDir()
 
-    /** Windows Hello, if this is Windows and Hello is set up. */
-    fun windowsHello(): DeviceProtector? = nativeWindowsHello()
+    /**
+     * This computer's device unlock, if it has one: Windows Hello, the macOS Secure
+     * Enclave, or on Linux the TPM (with a PIN) or else the desktop keyring.
+     */
+    fun desktopProtector(): DeviceProtector? = nativeDesktopProtector()
 }
 
 /**
@@ -129,9 +135,18 @@ interface DeviceProtector {
     /** What the UI calls it: "Windows Hello", "fingerprint or screen lock". */
     val label: String
 
+    /**
+     * The app asks for a PIN itself and passes it with each call (the Linux TPM).
+     * Other protectors show the platform's own prompt.
+     */
+    val needsPin: Boolean get() = false
+
     companion object {
         const val ANDROID_KEYSTORE = 1
         const val WINDOWS_HELLO = 2
+        const val SECURE_ENCLAVE = 3
+        const val TPM = 4
+        const val SECRET_SERVICE = 5
     }
 }
 
@@ -155,7 +170,7 @@ internal expect fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteA
 
 internal expect fun nativeDefaultStateDir(): String?
 
-internal expect fun nativeWindowsHello(): DeviceProtector?
+internal expect fun nativeDesktopProtector(): DeviceProtector?
 
 /** Overwrites the array with zeros. */
 fun ByteArray.wipe() = fill(0)
