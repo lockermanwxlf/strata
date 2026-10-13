@@ -104,6 +104,7 @@ fn epoch_record(
         epoch,
         creator,
         key_id: keys.key_id,
+        recovery_pk_hash: [0; 32],
         cutover: &cutover,
         chain: previous.map(|prev| ChainWrap {
             chain_key: &keys.chain,

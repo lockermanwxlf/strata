@@ -42,6 +42,15 @@ impl Keyring {
         &self.epochs[&self.current].1
     }
 
+    /// Adds the next epoch after a rotation this device performed or joined, and makes
+    /// it current.
+    pub(crate) fn push(&mut self, vault_id: &Id, ek: SecretKey) -> &EpochKeys {
+        let keys = EpochKeys::derive(vault_id, &ek);
+        self.current += 1;
+        self.epochs.insert(self.current, (ek, keys));
+        &self.epochs[&self.current].1
+    }
+
     /// The raw epoch key `EK_e`. Only rotation needs it, to wrap it under the next epoch.
     pub fn epoch_key(&self, epoch: u32) -> Option<&SecretKey> {
         self.epochs.get(&epoch).map(|(ek, _)| ek)
@@ -54,7 +63,7 @@ impl Keyring {
     /// Key IDs are public, so several records may claim one: a planted copy with a
     /// garbage chain wrap must not hide the real record. Every match is tried, and
     /// only a chain wrap that authenticates under this epoch's chain key counts.
-    fn walk(
+    pub(crate) fn walk(
         vault_id: &Id,
         records: &[EpochRecord<'_>],
         top: u32,
@@ -168,7 +177,7 @@ impl VaultFiles {
 
     /// Parses every epoch record. A newer format version stops everything
     /// (`UpdateRequired`); any other problem sets that file aside.
-    fn epoch_records(
+    pub(crate) fn epoch_records(
         &self,
         rejected: &mut Vec<(String, CoreError)>,
     ) -> Result<Vec<EpochRecord<'_>>> {
@@ -185,7 +194,10 @@ impl VaultFiles {
         Ok(out)
     }
 
-    fn slots(&self, rejected: &mut Vec<(String, CoreError)>) -> Result<Vec<SlotFile<'_>>> {
+    pub(crate) fn slots(
+        &self,
+        rejected: &mut Vec<(String, CoreError)>,
+    ) -> Result<Vec<SlotFile<'_>>> {
         let mut out = Vec::new();
         for (name, bytes) in &self.slots {
             match SlotFile::parse(bytes, &self.vault_id, SlotScope::Synced)

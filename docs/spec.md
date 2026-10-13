@@ -224,6 +224,8 @@ anchor_tag = HMAC-SHA256(anchor_key, "strata v1 recovery-anchor" || vault_id
 
 At rotation, `pk`, `anchor_epoch` and `anchor_tag` are copied unchanged into the re-wrapped slot.
 
+**Which key rotation re-wraps to.** Anyone can write a recovery slot for a `pk` of their own, anchor included. A rotation that re-wrapped every recovery slot it found would hand the new epoch key to whoever planted one. So the rotating device re-wraps only to the `pk` whose hash the current epoch's record names (§7.1). It uses only a record it has verified: the record's `key_id` is this device's key ID, and its chain wrap opens (for epoch 0, its creator's signature verifies). If the named slot is missing, or verified records disagree, the new epoch has no recovery slot and its record names none. The UI then offers a new recovery key.
+
 **Unlock with `R`.** Applies on every device, including fresh ones, so recovery is **not** trust-on-first-use:
 
 1. Derive `(sk, pk)`. Consider only kind-2 slots whose `pk` matches. Pick the one with the highest epoch.
@@ -293,8 +295,9 @@ File name: `epochs/<epoch:08x>-<creator clientId>.epoch`. `C` below is `cutover_
 [24..28)  LE32 epoch
 [28..44)  creator client_id
 [44..76)  key_id_epoch
-[76..78)  LE16 cutover_count
-[78..X)   cutover entries: client_id[16] || LE64 seq      X = 78 + 24*C
+[76..108) recovery_pk_hash          SHA-256(pk) of the recovery key, or 32 zero bytes for none
+[108..110) LE16 cutover_count
+[110..X)  cutover entries: client_id[16] || LE64 seq      X = 110 + 24*C
 -- epoch > 0 only:
 [X..X+24)     nonce
 [X+24..X+72)  Seal(chain_key_epoch, nonce, EK_{epoch-1}, aad = [0..X+24))
@@ -304,26 +307,28 @@ File name: `epochs/<epoch:08x>-<creator clientId>.epoch`. `C` below is `cutover_
 
 - **Epoch 0** has `cutover_count = 0` and no chain wrap. It is protected by the `key_id` check in §6.3 and by its creator's signature.
 - **Epoch > 0:** the chain wrap authenticates the whole record under `EK_epoch`, and the signature attributes it to its creator.
+- **`recovery_pk_hash`** names the recovery key (§6.2.1) that rotation re-wraps to. For epochs above 0 the chain wrap authenticates it under `EK_epoch`, so only a holder of that key can name one. Slot files carry no such protection: a storage attacker can forge them.
 - **The cutover vector** is the creator's applied vector clock at rotation. It records which devices were known when the rotation happened (§7.2). Its entries follow the vector-clock rules in §8.2: sorted by `client_id`, no duplicates, no zero seqs, and at most 4096.
 
 ### 7.2 Rotation
 
 Rotation is how revocation works: removing a synced slot, revoking a device, changing the password, and purging (§10.4). Removing a synced slot without rotating gives no protection, because anyone who kept a copy of the old slot file can still open it. So **the core MUST rotate whenever it removes a synced slot.**
 
-1. Generate a new `EK_{e+1}`.
-2. Write epoch record `e+1`. Its `cutover` is the rotating client's current applied vector clock (§9.1), and it carries `EK_e` wrapped under `chain_key_{e+1}`.
-3. For every synced slot being kept, write a new slot file with a new `slot_id`, wrapping `EK_{e+1}`:
+1. Sync, then generate a new `EK_{e+1}`. A device that has never written registers first (§6.4), so that others can verify its record.
+2. For every synced slot being kept, write a new slot file with a new `slot_id`, wrapping `EK_{e+1}`:
    - **Password slots:** the user enters the password. This is the new password when the rotation is a password change.
-   - **Recovery slots:** re-wrapped to `pk` (§6.2.1). The recovery key isn't needed.
+   - **Recovery slots:** re-wrapped to the `pk` that record `e` names (§6.2.1). The recovery key isn't needed.
    - **FIDO2 slots:** the token must be present. A token that isn't present has its slot dropped, and the UI offers to re-enroll the token later.
-4. Re-wrap this device's local slots, then delete every slot file with `epoch <= e`.
-5. From now on, write events in epoch `e+1`.
+3. Write epoch record `e+1`. Its `cutover` is the rotating client's current applied vector clock (§9.1). It names the recovery key kept or created, and carries `EK_e` wrapped under `chain_key_{e+1}`.
+4. List the epoch records again. If another record for `e+1` beats this one (see concurrent rotations below), delete this record and the slots from step 2 and stop. Nothing depends on them yet.
+5. Re-wrap this device's local slots. A local slot whose protector can't be reached during the rotation is dropped, and the UI offers to re-enroll it. Pin `(e+1, key_id_{e+1})`, then delete every slot file with `epoch <= e`.
+6. From now on, write events in epoch `e+1`.
 
-Steps 2 and 3 complete before step 4, so a crash part-way through leaves the vault usable.
+Slots go up before the record. Without a record they are never tried (§6.3 step 2), whereas a record without slots would leave epoch `e+1` unreachable for every device. Old slots go last, so a crash at any point leaves the vault usable.
 
 **Rotation never wraps the new key under an old one.** Otherwise a revoked holder of `EK_e` could follow the chain forward. The result is that other devices' local slots, which wrap `EK_e`, now open only the old epoch. Those devices fall back to a synced protector (the password) once, then re-wrap their local slots. The core can do that re-wrap in the same session without another biometric prompt.
 
-Until a device holds the newest epoch's key it MUST NOT write. Anything written under an old key is readable by every holder of that key, which after a revocation includes the revoked device. A device that sees a newer epoch record than it can open stops writing and asks for a synced protector (the password) again. It keeps reading.
+Until a device holds the newest epoch's key it MUST NOT write. Before each write and each snapshot it checks a fresh listing for a newer epoch record, so the check doesn't wait for the next sync. Anything written under an old key is readable by every holder of that key, which after a revocation includes the revoked device. A device that sees a newer epoch record than it can open stops writing and asks for a synced protector (the password) again. It keeps reading.
 
 **Late events from an old epoch.** These are legitimate when a device was offline during a rotation and wrote events under the key it had. Take an event `(c, s)` in epoch `e' < current`:
 
@@ -332,7 +337,19 @@ The event is applied like any other: its signature (§6.4) proves which device w
 - **`c` appears in `cutover_{e'+1}`** (the device was known when the rotation happened): nothing to flag, unless `c` has since been retired.
 - **`c` doesn't appear:** the device registered under an old key after the rotation. That is how a revoked device holding the old key would invent a new identity, so the device is marked **suspect** in the device list, and its changes are flagged for review.
 
-Concurrent rotations, meaning two records for the same epoch: OPEN-2.
+**Concurrent rotations.** Two devices may rotate at the same moment and write two records for the same epoch. The rule:
+
+- Consider the records for an epoch whose signatures verify against the key of a registered device that isn't retired (§6.4, §9.2). **The one with the lowest `key_id` (bytewise) wins.** Records from unknown devices never win, so storage alone can't make a device give up its key. Records from retired devices never win either, so a revoked device that still holds the previous key can't take over the epoch that revoked it.
+- **Only a device's current epoch is contested.** Rotating syncs first (step 1), so no device builds a new epoch on a key it has seen lose. Once a vault has moved past an epoch, a record written for it later can't reopen it.
+- **Prevention.** Step 4 of the procedure catches most races: the later rotation sees the earlier record and backs out. That device now sees an epoch newer than any key it holds. As after any rotation, it unlocks with the winning device's password.
+- **When both get past step 4,** both records stay. A device has **lost the rotation** when its key for its current epoch (above 0) loses. It keeps reading but writes nothing more. To **rejoin**:
+  1. It opens the winning key with a credential for it, normally the password set on the winning device. The winning key's chain must reach this device's key for the epoch below, which proves that both share the history before the race.
+  2. It becomes a new client (§9.4).
+  3. It re-issues, as new ops, the changes it made under the losing key: its own ops past its last event in the shared history (whether still in events or compacted into its own snapshot), and its pending events.
+
+  The **shared history** is what the device learned through events and snapshots sealed below the losing epoch. The re-issued ops go in one event whose vector clock is the shared history, not everything applied since. They therefore stay concurrent with whatever the winning side did after the race, exactly as without the race: a secret field both sides changed becomes a conflict (§9.2), and a re-issued delete beats only the writes it saw. The device's rollback marks carry over for the shared history only, because nothing written under the losing key is readable with the winning one.
+- Events written under the losing key stay in the store. Devices holding the winning key can't open them and set them aside (§9.1).
+- Suppose a device pinned a losing key and then unlocks with the winner's password. That trips the substitution check (§6.3 step 4). The way back is to unlock with the device's own password and then rejoin. If the losing slots are gone too (the winner rotated again), the device has to forget its local state and unlock as a new device.
 
 ## 8. Events
 
@@ -552,11 +569,16 @@ Because union is safe (§9.3), a device MAY load several snapshots in any order.
 
 A purge permanently removes an entry. The client:
 
-1. Removes every op on the entry and writes a new snapshot.
-2. Deletes all event files and every other snapshot.
-3. Rotates the epoch (§7).
+1. Rotates the epoch (§7.2).
+2. Removes every op on the entry from its op set and writes a snapshot, sealed under the new key.
+3. Deletes every event file the snapshot's watermark covers. It also deletes every other snapshot it has loaded: each is covered, because a loaded snapshot's watermark counts as applied (§10.2).
+4. Reports what it couldn't remove, because either may still mention the entry:
+   - event files outside the watermark (written concurrently, or not yet applied here)
+   - snapshots it couldn't read
 
-The rotation keeps copies the attacker already has from leading to future data. Those copies stay readable to the attacker forever, because data that has already been uploaded can't be taken back. Details: OPEN-10.
+**Why rotate first.** A device that hasn't caught up still holds the entry in memory. Once the newer epoch record exists, that device stops writing, snapshots included (§7.2). So it can't snapshot the entry back into the vault, and when it catches up, it rebuilds from what the purge left. Nothing under the new key ever held the entry. If the client crashes before step 3, the old files stay in place, and purging again finishes the job.
+
+**What purge can't prevent.** A device that listed the store just before the rotation can still write an event or snapshot that mentions the entry. The next purge removes it. Copies an attacker already made stay readable to them forever, because data that has been uploaded can't be taken back. The rotation does keep those copies from unlocking anything written later.
 
 ## 11. Local state (per device, never uploaded)
 
@@ -665,7 +687,7 @@ Each of these MUST fail loudly:
 ## 15. Open questions
 
 1. ~~Rotation needs every protector present.~~ **Resolved 2026-10-11:** recovery slots use HPKE with the X-Wing post-quantum hybrid KEM, plus an anchor (§3, §6.2.1). FIDO2 tokens still have to be present at rotation, or their slots are dropped and offered for re-enrollment.
-2. **Concurrent rotations** produce two records for the same epoch. A proposed rule: the record with the bytewise-lowest `key_id` wins. The losing creator unlocks the winner with a synced protector, re-issues its events from the losing epoch, and writes no further events in that epoch.
+2. ~~Concurrent rotations.~~ **Resolved 2026-10-12:** the lowest `key_id` among records signed by registered devices wins. A rotation backs out when it sees a winning record. A device that loses anyway rejoins with the winner's credential, as a new client, and re-issues its changes (§7.2).
 3. ~~Recovery key format.~~ **Resolved 2026-10-11:** 256 bits, shown as a 24-word BIP39 mnemonic (§6.2.1).
 4. **FIDO2.** RP ID, whether user verification is required, and whether to require a resident (discoverable) credential.
 5. ~~Strength thresholds.~~ **Resolved 2026-10-11:** passwords of any strength may sync. The UI warns and requires confirmation below about 10^10 estimated guesses (§6.2). PINs remain local-only.
@@ -673,7 +695,7 @@ Each of these MUST fail loudly:
 7. ~~Per-device signing keys.~~ **Resolved 2026-10-11:** every device signs its events, snapshots and epoch records with Ed25519 (§6.4). Late old-epoch events are attributed to their device, and only flagged when that device is retired or suspect (§7.2).
 8. ~~Forward compatibility.~~ **Resolved 2026-10-11:** strict. A newer version reports "update required" rather than an alarm (§12).
 9. **Garbage collection.** Is 30 days the right grace period, and should GC be automatic or user-triggered?
-10. **Purge details.** Ordering and crash safety of "write snapshot, delete everything else, rotate".
+10. ~~Purge details.~~ **Resolved 2026-10-12:** rotate, then write a snapshot under the new key, then delete what it covers, and report anything left over (§10.4).
 11. ~~CBOR crate choice.~~ **Resolved 2026-10-11:** `minicbor`. The re-encode check (§4) is still mandatory.
 12. **Attachments.** Out of scope for v1. The 1 MiB body limit excludes them.
 13. **Hardware-backed device keys.** `dev_sk` is a software key in encrypted local state. Platform keystores that can do Ed25519 could hold it instead, and so could Android Keystore on newer API levels. That's a later improvement, and it doesn't change the format.

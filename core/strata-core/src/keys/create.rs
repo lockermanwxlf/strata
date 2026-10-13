@@ -53,12 +53,15 @@ pub fn create_vault(
     let ek0 = SecretKey::generate()?;
     let keys0 = EpochKeys::derive(&vault_id, &ek0);
     let device = DeviceKey::generate()?;
+    let r = recovery::generate()?;
+    let keypair = RecoveryKeyPair::derive(&r);
 
     let epoch0 = NewEpoch {
         vault_id,
         epoch: 0,
         creator: client_id,
         key_id: keys0.key_id,
+        recovery_pk_hash: recovery::pk_hash(keypair.public_key()),
         cutover: &VectorClock::default(),
         chain: None,
     }
@@ -77,8 +80,6 @@ pub fn create_vault(
         &ek0,
     )?;
 
-    let r = recovery::generate()?;
-    let keypair = RecoveryKeyPair::derive(&r);
     let recovery_slot_id = random_id()?;
     let recovery_slot = slot::seal_recovery(
         &vault_id,

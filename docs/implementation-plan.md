@@ -29,13 +29,11 @@ These are the open questions from spec §15, ordered by the phase that needs the
 |---|---|---|
 | OPEN-6: key-ID fingerprint | Phase 9 (UI) | It's UI-only, so it can come late. |
 | OPEN-9: GC grace period | Phase 6 | |
-| OPEN-10: purge details | Phase 6 | |
-| OPEN-2: concurrent rotations | Phase 7 | |
 | OPEN-4: FIDO2 details | Phase 10 | Starts with a research spike. |
 | OPEN-12: attachments | After v1 | |
 | OPEN-13: hardware-backed device keys | After v1 | Doesn't change the format. |
 
-Resolved: OPEN-1 (HPKE recovery slot), OPEN-3 (BIP39), OPEN-5 (passwords warn, not block), OPEN-7 (Ed25519 device keys), OPEN-8 (strict versioning), OPEN-11 (`minicbor`).
+Resolved: OPEN-1 (HPKE recovery slot), OPEN-3 (BIP39), OPEN-5 (passwords warn, not block), OPEN-7 (Ed25519 device keys), OPEN-8 (strict versioning), OPEN-11 (`minicbor`), OPEN-2 (lowest key ID wins, losers rejoin), OPEN-10 (rotate, snapshot, then delete).
 
 **Not in the spec yet:**
 
@@ -335,13 +333,30 @@ This phase is pure logic with no crypto, so it can start right after Phase 0, in
 
 **Tests:**
 
-- A retired device's events past `last_seq` are rejected.
+- A retired device's events past `last_seq` are flagged for review (not rejected, see spec §9.2).
 - Old-epoch events from a device unknown at the rotation mark it suspect, and its changes are flagged.
 - A revoked device can't read new events.
 - A replayed old password slot doesn't open the current epoch.
 - An offline device that was known at the rotation and not revoked has its late events accepted.
 
 **Exit:** the tests pass. Then a **review checkpoint: rotation and revocation.**
+
+**Status: done (2026-10-12).**
+
+- **Session API** (`sync/session/rotate.rs`):
+  - `rotate(password, Keep | Replace)`: slots first, then the epoch record, then a check for a winning rival record (backing out on `ConflictingRotation`), then the pin, then deleting old slots
+  - `change_password`, `replace_recovery_key` (returns the new words), `revoke_device` (`RetireClient` at the last seen seq, then rotate)
+  - `rejoin(credential)` after `SyncReport::lost_rotation`, `purge(entry, password)` returning a `PurgeReport`, `revert_flagged()`
+- **Format change:** epoch records name the recovery key (`recovery_pk_hash`, spec §7.1). Rotation re-wraps only that key, so a recovery slot planted in storage never receives a new epoch key. Vectors regenerated, Python cross-check updated.
+- **Writes check a fresh listing** for a newer epoch record first (spec §7.2), so a device that hasn't synced can't snapshot a purged entry back.
+- The session tracks epoch records as they appear, and a pinned record that disappears is a rollback.
+- **Review checkpoint** (self-review, 10 findings; all fixed):
+  - Only the current epoch is contested, and retired devices never win, so a revoked device can't force the vault read-only.
+  - Rejoin re-issues on the shared-history clock, so concurrent secret edits become conflicts instead of being overwritten.
+  - Rejoin counts compacted history, for both the changes it re-issues and the rollback marks it keeps.
+  - Revocation rotates before retiring the device, and purge restores the op set if its snapshot fails.
+  - Pre-write checks list only `epochs/`, through the new `RemoteStore::list_dir`, and the fuzz seeds were regenerated.
+- **Deferred:** adding and removing extra synced slots waits for FIDO2 (Phase 10). Rotation clears this device's local slots, and re-wrapping them comes with the platform protectors (Phases 10 and 11).
 
 ### Phase 8: FFI surface (M)
 

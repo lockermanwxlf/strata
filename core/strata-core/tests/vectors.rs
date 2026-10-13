@@ -357,6 +357,7 @@ fn file_vectors() -> Value {
         epoch: 0,
         creator: alice,
         key_id: k0.key_id,
+        recovery_pk_hash: recovery::pk_hash(kp.public_key()),
         cutover: &no_cutover,
         chain: None,
     }
@@ -368,6 +369,7 @@ fn file_vectors() -> Value {
         epoch: 1,
         creator: alice,
         key_id: k1.key_id,
+        recovery_pk_hash: recovery::pk_hash(kp.public_key()),
         cutover: &cutover,
         chain: Some(ChainWrap {
             chain_key: &k1.chain,

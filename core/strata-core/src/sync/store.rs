@@ -16,6 +16,17 @@ pub trait RemoteStore: Send + Sync {
     /// Sorted.
     fn list(&self) -> Result<Vec<String>>;
 
+    /// The files in one top-level directory (`epochs`, `slots`, ...), as `list` would
+    /// name them. Sorted. Cheaper than `list` when only one kind of file matters.
+    fn list_dir(&self, dir: &str) -> Result<Vec<String>> {
+        let prefix = format!("{dir}/");
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|p| p.starts_with(&prefix))
+            .collect())
+    }
+
     /// Reads `path`, refusing files larger than `max_len` without reading them in
     /// full: a planted multi-gigabyte file must not exhaust memory.
     fn read(&self, path: &str, max_len: usize) -> Result<Vec<u8>>;

@@ -36,6 +36,11 @@ pub enum CoreError {
     #[error("the vault's key was changed on another device; unlock again to keep editing")]
     KeyRotated,
 
+    /// Another device started a rotation to the same epoch moments earlier and won
+    /// (spec §7.2). Nothing was changed; unlock with that device's password.
+    #[error("another device changed the vault key at the same time; unlock with its password")]
+    ConflictingRotation,
+
     /// No slot opened with the password or recovery key given.
     #[error("that password or recovery key doesn't unlock this vault")]
     WrongCredential,

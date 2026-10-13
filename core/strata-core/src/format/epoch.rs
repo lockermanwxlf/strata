@@ -10,7 +10,7 @@ use crate::error::{CoreError, Result};
 use crate::format::names::FileName;
 
 pub const MAGIC: &[u8; 4] = b"STEP";
-const FIXED_LEN: usize = 78;
+const FIXED_LEN: usize = 110;
 const CUTOVER_ENTRY_LEN: usize = 24;
 const CHAIN_LEN: usize = NONCE_LEN + SecretKey::LEN + TAG_LEN;
 pub const MAX_LEN: usize =
@@ -23,6 +23,9 @@ pub struct EpochRecord<'a> {
     pub epoch: u32,
     pub creator: Id,
     pub key_id: [u8; 32],
+    /// SHA-256 of the recovery public key that rotation re-wraps to, or all zeros
+    /// for none (spec §6.2.1). Authenticated by the chain wrap for epochs above 0.
+    pub recovery_pk_hash: [u8; 32],
     /// The creator's applied vector clock at rotation (empty for epoch 0).
     pub cutover: VectorClock,
     signed: &'a [u8],
@@ -42,6 +45,7 @@ impl<'a> EpochRecord<'a> {
         let epoch = r.u32_le()?;
         let creator = r.array()?;
         let key_id = r.array()?;
+        let recovery_pk_hash = r.array()?;
         let count = r.u16_le()? as usize;
         if count > MAX_CLOCK_ENTRIES {
             return Err(CoreError::rejected(WHAT, "too many cutover entries"));
@@ -68,6 +72,7 @@ impl<'a> EpochRecord<'a> {
             epoch,
             creator,
             key_id,
+            recovery_pk_hash,
             cutover,
             signed,
             signature,
@@ -118,6 +123,7 @@ pub struct NewEpoch<'a> {
     pub epoch: u32,
     pub creator: Id,
     pub key_id: [u8; 32],
+    pub recovery_pk_hash: [u8; 32],
     pub cutover: &'a VectorClock,
     pub chain: Option<ChainWrap<'a>>,
 }
@@ -143,6 +149,7 @@ impl NewEpoch<'_> {
         out.extend_from_slice(&self.epoch.to_le_bytes());
         out.extend_from_slice(&self.creator);
         out.extend_from_slice(&self.key_id);
+        out.extend_from_slice(&self.recovery_pk_hash);
         out.extend_from_slice(&(self.cutover.0.len() as u16).to_le_bytes());
         for (client, seq) in &self.cutover.0 {
             out.extend_from_slice(client);
@@ -182,6 +189,7 @@ mod tests {
             epoch: 0,
             creator: [2; 16],
             key_id: [3; 32],
+            recovery_pk_hash: [0; 32],
             cutover: &empty,
             chain: None,
         }
@@ -198,6 +206,7 @@ mod tests {
             epoch: 1,
             creator: [2; 16],
             key_id: [4; 32],
+            recovery_pk_hash: [0; 32],
             cutover: &cutover,
             chain: Some(ChainWrap {
                 chain_key: &key(5),
@@ -223,6 +232,7 @@ mod tests {
             epoch: 1,
             creator: [2; 16],
             key_id: [4; 32],
+            recovery_pk_hash: [0; 32],
             cutover: &cutover,
             chain: Some(ChainWrap {
                 chain_key: &key(5),

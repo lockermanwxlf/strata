@@ -7,7 +7,7 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::XWing;
 use hpke::rand_core::{TryCryptoRng, TryRng};
 use hpke::{Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::kdf::{hkdf, label};
@@ -192,6 +192,12 @@ fn open_base(
         aad,
     )
     .ok()
+}
+
+/// How an epoch record names the recovery key that rotation re-wraps to (spec §7.1):
+/// SHA-256 of its public key. All zeros means none.
+pub fn pk_hash(pk: &[u8]) -> [u8; 32] {
+    Sha256::digest(pk).into()
 }
 
 /// The recovery anchor (spec §6.2.1). Computed only when `R` is generated, with

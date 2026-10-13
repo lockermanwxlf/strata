@@ -65,14 +65,21 @@ impl RemoteStore for FsStore {
             }
         }
         for dir in DIRS {
-            for entry in read_dir_if_exists(&self.root.join(dir))? {
-                let entry = entry?;
-                if entry.file_type()?.is_file()
-                    && let Some(name) = entry.file_name().to_str()
-                    && visible(name)
-                {
-                    out.push(format!("{dir}/{name}"));
-                }
+            out.extend(self.list_dir(dir)?);
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    fn list_dir(&self, dir: &str) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for entry in read_dir_if_exists(&self.root.join(dir))? {
+            let entry = entry?;
+            if entry.file_type()?.is_file()
+                && let Some(name) = entry.file_name().to_str()
+                && !name.starts_with('.')
+            {
+                out.push(format!("{dir}/{name}"));
             }
         }
         out.sort();

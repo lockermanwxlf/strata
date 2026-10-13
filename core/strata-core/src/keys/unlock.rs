@@ -41,9 +41,9 @@ pub struct Unlocked {
     pub newer_epoch_unreachable: bool,
     /// Files that failed to parse and were set aside.
     pub rejected_files: Vec<(String, CoreError)>,
-    /// The raw epoch records. The sync session needs their cutover vectors and
-    /// checks their signatures once their creators' keys are known.
-    pub epoch_files: Vec<Vec<u8>>,
+    /// The raw epoch records by path. The sync session needs their cutover vectors
+    /// and checks their signatures once their creators' keys are known.
+    pub epoch_files: Vec<(String, Vec<u8>)>,
 }
 
 pub fn unlock(
@@ -75,14 +75,7 @@ pub fn unlock(
 
     // Slots below the pinned epoch are stale (spec §6.3 step 4) and never tried.
     let min_epoch = pin.map_or(0, |p| p.epoch);
-    let keyring = match credential {
-        Credential::Password(password) => {
-            open_password(&vault_id, &records, &slots, password, min_epoch)?
-        }
-        Credential::RecoveryWords(words) => {
-            open_recovery(&vault_id, &records, &slots, words, min_epoch)?
-        }
-    };
+    let keyring = open_keyring(&vault_id, &records, &slots, credential, min_epoch, |_| true)?;
     if let Some(pin) = pin {
         let reached = keyring.keys(pin.epoch).map(|k| k.key_id);
         if !reached.is_some_and(|id| bool::from(id.ct_eq(&pin.key_id))) {
@@ -117,7 +110,11 @@ pub fn unlock(
         state,
         new_client,
         rejected_files: rejected,
-        epoch_files: files.epochs.into_iter().map(|(_, bytes)| bytes).collect(),
+        epoch_files: files
+            .epochs
+            .into_iter()
+            .map(|(name, bytes)| (name.to_path(), bytes))
+            .collect(),
     })
 }
 
@@ -138,12 +135,34 @@ fn check_records_against_pin(records: &[EpochRecord<'_>], pin: &Pin) -> Result<(
     Ok(())
 }
 
+/// Opens the newest slot the credential unlocks, at `min_epoch` or above, whose
+/// chain walks and whose keyring `accept` takes. Rejoining after a lost concurrent
+/// rotation uses `accept` to pass over the losing key (spec §7.2).
+pub(crate) fn open_keyring(
+    vault_id: &Id,
+    records: &[EpochRecord<'_>],
+    slots: &[SlotFile<'_>],
+    credential: Credential<'_>,
+    min_epoch: u32,
+    accept: impl Fn(&Keyring) -> bool,
+) -> Result<Keyring> {
+    match credential {
+        Credential::Password(password) => {
+            open_password(vault_id, records, slots, password, min_epoch, accept)
+        }
+        Credential::RecoveryWords(words) => {
+            open_recovery(vault_id, records, slots, words, min_epoch, accept)
+        }
+    }
+}
+
 fn open_password(
     vault_id: &Id,
     records: &[EpochRecord<'_>],
     slots: &[SlotFile<'_>],
     password: &[u8],
     min_epoch: u32,
+    accept: impl Fn(&Keyring) -> bool,
 ) -> Result<Keyring> {
     let mut candidates: Vec<_> = slots
         .iter()
@@ -167,7 +186,8 @@ fn open_password(
             continue;
         };
         match Keyring::walk(vault_id, records, slot.epoch, ek) {
-            Ok(keyring) => return Ok(keyring),
+            Ok(keyring) if accept(&keyring) => return Ok(keyring),
+            Ok(_) => {}
             Err(e) => inconsistent = Some(e),
         }
     }
@@ -180,6 +200,7 @@ fn open_recovery(
     slots: &[SlotFile<'_>],
     words: &[u8],
     min_epoch: u32,
+    accept: impl Fn(&Keyring) -> bool,
 ) -> Result<Keyring> {
     let r = recovery::from_words(words)?;
     let keypair = RecoveryKeyPair::derive(&r);
@@ -230,7 +251,9 @@ fn open_recovery(
         if !anchored {
             return Err(CoreError::Alarm(AlarmKind::SlotSubstitution));
         }
-        return Ok(keyring);
+        if accept(&keyring) {
+            return Ok(keyring);
+        }
     }
     Err(inconsistent.unwrap_or(CoreError::WrongCredential))
 }

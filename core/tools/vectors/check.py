@@ -370,6 +370,7 @@ def check_files():
         elif kind == 2:
             r = h(s["recovery_key"])
             _, pk = derive_keypair(r)
+            recovery_pk_hash = hashlib.sha256(pk).digest()  # named by the epoch records
             anchor_key = hkdf(vid, r, b"strata v1 recovery-anchor-key")
             anchor_epoch = s["anchor_epoch"]
             msg = b"strata v1 recovery-anchor" + vid + le32(anchor_epoch) + keys[anchor_epoch]["key-id"] + pk
@@ -395,6 +396,7 @@ def check_files():
     for e in v["epochs"]:  # spec §7.1
         epoch = e["epoch"]
         record = preamble(b"STEP") + vid + le32(epoch) + h(e["creator"]) + keys[epoch]["key-id"]
+        record += recovery_pk_hash
         record += le16(len(e["cutover"])) + b"".join(h(c) + le64(s) for c, s in e["cutover"])
         if epoch > 0:
             nonce = h(e["chain_nonce"])

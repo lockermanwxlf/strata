@@ -517,6 +517,7 @@ fn a_device_appearing_under_an_old_key_after_a_rotation_is_suspect() {
         epoch: 1,
         creator: old.client_id(),
         key_id: keys1.key_id,
+        recovery_pk_hash: [0; 32],
         cutover: &old.applied,
         chain: Some(ChainWrap {
             chain_key: &keys1.chain,
@@ -605,6 +606,7 @@ fn rotate_to_epoch_1(store: &MemoryStore, by: &Session<'_>, new_password: &[u8])
         epoch: 1,
         creator: by.client_id(),
         key_id: keys1.key_id,
+        recovery_pk_hash: [0; 32],
         cutover: &by.applied,
         chain: Some(ChainWrap {
             chain_key: &keys1.chain,
@@ -975,4 +977,568 @@ fn compaction_under_a_key_not_yet_held_is_unverified_not_an_alarm() {
     let report = b.sync().unwrap();
     assert!(!report.integrity_unverified && !report.key_rotated);
     assert_eq!(field(&b, X, "title").as_deref(), Some("2"));
+}
+
+// ---- Rotation and key management (spec §7.2, §6.2.1, §10.4) -----------------------
+
+#[test]
+fn changing_the_password_rotates_and_other_devices_follow() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "before")]).unwrap();
+
+    let rotated = a.change_password(b"new password").unwrap();
+    assert_eq!((rotated.epoch, rotated.recovery_lost), (1, false));
+    a.write(vec![set(X, "notes", "after")]).unwrap();
+    assert!(matches!(
+        unlock(
+            &store,
+            &MemoryLocalStore::new(),
+            Credential::Password(PASSWORD)
+        ),
+        Err(CoreError::WrongCredential)
+    ));
+
+    // B notices, stops writing, and catches up with the new password.
+    assert!(b.sync().unwrap().key_rotated);
+    assert!(matches!(
+        b.write(vec![set(X, "title", "stale")]),
+        Err(CoreError::KeyRotated)
+    ));
+    let unlocked = unlock(&store, &b_local, Credential::Password(b"new password")).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    b.sync().unwrap();
+    assert_eq!(field(&b, X, "notes").as_deref(), Some("after"));
+    b.write(vec![set(X, "title", "caught up")]).unwrap();
+    a.sync().unwrap();
+    assert_eq!(contents(&a), contents(&b));
+}
+
+#[test]
+fn a_replayed_old_password_slot_opens_only_the_old_epoch() {
+    let (store, a_local) = new_vault();
+    let old_slots: Vec<_> = store
+        .paths_in("slots")
+        .into_iter()
+        .map(|p| {
+            let bytes = store.get(&p).unwrap();
+            (p, bytes)
+        })
+        .collect();
+    let mut a = open(&store, &a_local, "Laptop");
+    a.change_password(b"new password").unwrap();
+    a.write(vec![set(X, "password", "after")]).unwrap();
+    for (path, bytes) in old_slots {
+        store.put(&path, bytes);
+    }
+
+    // A device that has caught up never tries a slot below its pin.
+    assert!(matches!(
+        unlock(&store, &a_local, Credential::Password(PASSWORD)),
+        Err(CoreError::WrongCredential)
+    ));
+    // A fresh device gets the old epoch only: nothing newer to read, no writing.
+    let fresh = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &fresh, Credential::Password(PASSWORD)).unwrap();
+    assert!(unlocked.newer_epoch_unreachable);
+    let mut old = Session::new(&store, &fresh, unlocked, "Old").unwrap();
+    old.sync().unwrap();
+    assert_eq!(field(&old, X, "password"), None);
+    assert!(matches!(
+        old.write(vec![set(X, "title", "x")]),
+        Err(CoreError::KeyRotated)
+    ));
+}
+
+#[test]
+fn rotation_keeps_the_recovery_key_and_replacing_it_retires_the_old_one() {
+    let store = MemoryStore::new();
+    let a_local = MemoryLocalStore::new();
+    let words = create_vault(&store, &a_local, PASSWORD, "Laptop")
+        .unwrap()
+        .recovery_words;
+    let recover = |words: &SecretBytes| {
+        unlock(
+            &store,
+            &MemoryLocalStore::new(),
+            Credential::RecoveryWords(words.expose()),
+        )
+        .map(|u| u.keyring.current())
+    };
+    let mut a = open(&store, &a_local, "Laptop");
+
+    a.change_password(b"new password").unwrap();
+    assert_eq!(recover(&words).unwrap(), 1, "kept without the words");
+
+    let new_words = a.replace_recovery_key(b"new password").unwrap();
+    assert!(matches!(recover(&words), Err(CoreError::WrongCredential)));
+    assert_eq!(recover(&new_words).unwrap(), 2);
+    // The new key's anchor is at epoch 2, and later rotations keep it.
+    a.change_password(b"newer password").unwrap();
+    assert_eq!(recover(&new_words).unwrap(), 3);
+}
+
+#[test]
+fn rotation_rewraps_only_the_recovery_key_the_epoch_record_names() {
+    use crate::crypto::SecretKey;
+    use crate::crypto::recovery::{self, RecoveryKeyPair};
+    use crate::format::slot::{self, SlotFile, SlotParams};
+    use crate::policy::SlotScope;
+
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    // Someone who can write to the storage plants a recovery slot for their own key,
+    // anchor and all. Without the record naming the real one, rotation would hand
+    // them every later epoch key.
+    let r = recovery::generate().unwrap();
+    let pk = *RecoveryKeyPair::derive(&r).public_key();
+    let key_id_0 = a.keyring.keys(0).unwrap().key_id;
+    let planted_id = random_id().unwrap();
+    let planted = slot::seal_recovery(
+        &a.vault_id,
+        &planted_id,
+        0,
+        &SlotParams::Recovery {
+            anchor_tag: recovery::anchor_tag(&r, &a.vault_id, 0, &key_id_0, &pk),
+            pk: Box::new(pk),
+            anchor_epoch: 0,
+        },
+        &SecretKey::generate().unwrap(),
+        None,
+    )
+    .unwrap();
+    store.put(
+        &FileName::Slot {
+            slot_id: planted_id,
+        }
+        .to_path(),
+        planted,
+    );
+
+    a.change_password(b"new password").unwrap();
+    let recovery_pks: Vec<[u8; recovery::PUBLIC_KEY_LEN]> = store
+        .paths_in("slots")
+        .iter()
+        .filter_map(|path| {
+            let bytes = store.get(path).unwrap();
+            match SlotFile::parse(&bytes, &a.vault_id, SlotScope::Synced)
+                .unwrap()
+                .params
+            {
+                SlotParams::Recovery { pk, .. } => Some(*pk),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(recovery_pks.len(), 1);
+    assert_ne!(recovery_pks[0], pk);
+    let words = recovery::to_words(&r);
+    assert!(
+        unlock(
+            &store,
+            &MemoryLocalStore::new(),
+            Credential::RecoveryWords(words.expose())
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_missing_recovery_slot_is_reported_not_silently_dropped() {
+    use crate::format::slot::{SlotFile, SlotParams};
+    use crate::policy::SlotScope;
+
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    for path in store.paths_in("slots") {
+        let bytes = store.get(&path).unwrap();
+        let slot = SlotFile::parse(&bytes, &a.vault_id, SlotScope::Synced).unwrap();
+        if matches!(slot.params, SlotParams::Recovery { .. }) {
+            store.remove(&path);
+        }
+    }
+    assert!(a.change_password(b"new password").unwrap().recovery_lost);
+    // The new epoch names no recovery key, so there's nothing more to lose.
+    assert!(!a.change_password(b"newer password").unwrap().recovery_lost);
+}
+
+#[test]
+fn a_revoked_device_reads_nothing_new_and_its_late_changes_can_be_reverted() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "original")]).unwrap();
+    a.sync().unwrap();
+
+    assert!(a.revoke_device(a.client_id(), PASSWORD).is_err());
+    a.revoke_device(b.client_id(), PASSWORD).unwrap();
+    a.write(vec![set(X, "password", "new secret")]).unwrap();
+
+    // B holds only the old key: the new event stays out of reach.
+    let report = b.sync().unwrap();
+    assert!(report.key_rotated);
+    assert!(
+        report
+            .held
+            .iter()
+            .any(|(_, held)| *held == Held::UnknownEpoch(1))
+    );
+    assert_eq!(field(&b, X, "password"), None);
+
+    // Whoever has B's keys writes under the old epoch anyway.
+    let seq = b.state.record.next_seq;
+    let value = |v: &str| Some(SecretBytes::from_slice(v.as_bytes()));
+    let late = seal_as(
+        &b,
+        b.client_id(),
+        seq,
+        &b.device,
+        vec![
+            Op::SetField {
+                entry_id: X,
+                name: "title".into(),
+                value: value("tampered"),
+                secret: false,
+            },
+            Op::SetField {
+                entry_id: Y,
+                name: "title".into(),
+                value: value("planted"),
+                secret: false,
+            },
+        ],
+    );
+    store.put(&event_path(b.client_id(), seq), late);
+    a.sync().unwrap();
+    assert_eq!(field(&a, X, "title").as_deref(), Some("tampered"));
+    assert_eq!(a.review().flagged.len(), 2);
+
+    assert_eq!(a.revert_flagged().unwrap(), 2);
+    assert_eq!(field(&a, X, "title").as_deref(), Some("original"));
+    assert!(a.view().entries[&Y].deleted);
+    assert_eq!(a.revert_flagged().unwrap(), 0, "nothing left to revert");
+}
+
+/// Puts `files` into the store just before the next epoch record is created: another
+/// device's rotation landing while this one's is under way.
+struct RaceStore {
+    inner: MemoryStore,
+    files: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+}
+
+impl RemoteStore for RaceStore {
+    fn list(&self) -> Result<Vec<String>> {
+        self.inner.list()
+    }
+    fn read(&self, path: &str, max_len: usize) -> Result<Vec<u8>> {
+        self.inner.read(path, max_len)
+    }
+    fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if path.starts_with("epochs/") {
+            for (path, bytes) in self.files.lock().unwrap().drain(..) {
+                self.inner.put(&path, bytes);
+            }
+        }
+        self.inner.create(path, bytes)
+    }
+    fn delete(&self, path: &str) -> Result<()> {
+        self.inner.delete(path)
+    }
+}
+
+/// An epoch 1 record with `by`'s view as its cutover, claiming `creator`, with a
+/// chosen key ID, signed by `signer`.
+fn rival_record(
+    by: &Session<'_>,
+    creator: Id,
+    signer: &DeviceKey,
+    key_id: [u8; 32],
+) -> (String, Vec<u8>) {
+    use crate::crypto::SecretKey;
+    use crate::format::epoch::{ChainWrap, NewEpoch};
+
+    let chain_key = SecretKey::generate().unwrap();
+    let bytes = NewEpoch {
+        vault_id: by.vault_id,
+        epoch: 1,
+        creator,
+        key_id,
+        recovery_pk_hash: [0; 32],
+        cutover: &by.applied,
+        chain: Some(ChainWrap {
+            chain_key: &chain_key,
+            prev_epoch_key: by.keyring.epoch_key(0).unwrap(),
+            nonce: None,
+        }),
+    }
+    .seal(signer)
+    .unwrap();
+    let path = FileName::Epoch { epoch: 1, creator }.to_path();
+    (path, bytes)
+}
+
+fn race_vault() -> (RaceStore, MemoryLocalStore) {
+    let store = RaceStore {
+        inner: MemoryStore::new(),
+        files: Default::default(),
+    };
+    let local = MemoryLocalStore::new();
+    create_vault(&store, &local, PASSWORD, "Laptop").unwrap();
+    (store, local)
+}
+
+#[test]
+fn a_rotation_that_meets_a_winning_rival_backs_out() {
+    let (store, a_local) = race_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    a.sync().unwrap();
+    let before = store.list().unwrap();
+
+    // B's record for epoch 1 has the lowest possible key ID and lands mid-rotation.
+    let (rival_path, rival) = rival_record(&b, b.client_id(), &b.device, [0; 32]);
+    *store.files.lock().unwrap() = vec![(rival_path.clone(), rival)];
+    assert!(matches!(
+        a.change_password(b"new password"),
+        Err(CoreError::ConflictingRotation)
+    ));
+    // A took back its record and slots and left everything else alone.
+    let mut expected = before;
+    expected.push(rival_path);
+    expected.sort();
+    assert_eq!(store.list().unwrap(), expected);
+    assert!(matches!(
+        a.write(vec![set(X, "title", "a")]),
+        Err(CoreError::KeyRotated)
+    ));
+}
+
+#[test]
+fn rivals_that_lose_or_cant_be_verified_dont_stop_a_rotation() {
+    for winning_but_unsigned in [false, true] {
+        let (store, a_local) = race_vault();
+        let mut a = open(&store, &a_local, "Laptop");
+        let b_local = MemoryLocalStore::new();
+        let mut b = open(&store, &b_local, "Phone");
+        b.write(vec![set(X, "title", "b")]).unwrap();
+        a.sync().unwrap();
+
+        // Either a registered device's record with a higher key ID, or a lowest-key
+        // record from a device nobody registered: storage alone can't win.
+        let rival = if winning_but_unsigned {
+            rival_record(
+                &b,
+                random_id().unwrap(),
+                &DeviceKey::generate().unwrap(),
+                [0; 32],
+            )
+        } else {
+            rival_record(&b, b.client_id(), &b.device, [0xff; 32])
+        };
+        *store.files.lock().unwrap() = vec![rival];
+        a.change_password(b"new password").unwrap();
+        a.write(vec![set(X, "title", "a")]).unwrap();
+        assert!(!a.sync().unwrap().lost_rotation);
+    }
+}
+
+#[test]
+fn a_revoked_device_cant_win_the_current_epoch_after_the_fact() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    a.sync().unwrap();
+    a.revoke_device(b.client_id(), PASSWORD).unwrap();
+
+    // B still holds the epoch 0 key and its registered signing key. It writes its
+    // own record for epoch 1 with the lowest possible key ID, properly signed.
+    let (path, record) = rival_record(&b, b.client_id(), &b.device, [0; 32]);
+    store.put(&path, record);
+    let report = a.sync().unwrap();
+    assert!(
+        !report.lost_rotation,
+        "a retired device's record never wins"
+    );
+    a.write(vec![set(X, "title", "still writing")]).unwrap();
+}
+
+#[test]
+fn the_loser_of_a_concurrent_rotation_rejoins_and_keeps_its_changes() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "shared")]).unwrap();
+    a.sync().unwrap();
+    drop(b);
+    let (laptop_password, phone_password): (&[u8], &[u8]) = (b"laptop password", b"phone password");
+
+    // Both change the password at the same moment, neither seeing the other: B in a
+    // copy of the store whose new files arrive afterwards.
+    let elsewhere = MemoryStore::new();
+    for path in store.list().unwrap() {
+        elsewhere.put(&path, store.get(&path).unwrap());
+    }
+    {
+        let mut b = open(&elsewhere, &b_local, "Phone");
+        b.change_password(phone_password).unwrap();
+        b.write(vec![
+            set(Y, "title", "from the phone"),
+            set(X, "password", "phone secret"),
+        ])
+        .unwrap();
+    }
+    a.change_password(laptop_password).unwrap();
+    a.write(vec![
+        set(X, "notes", "from the laptop"),
+        set(X, "password", "laptop secret"),
+    ])
+    .unwrap();
+    for path in elsewhere.list().unwrap() {
+        if store.get(&path).is_none() {
+            store.put(&path, elsewhere.get(&path).unwrap());
+        }
+    }
+    let unlocked = unlock(&store, &b_local, Credential::Password(phone_password)).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+
+    // Exactly one key wins; which one depends on the random key IDs.
+    let a_lost = a.sync().unwrap().lost_rotation;
+    let b_lost = b.sync().unwrap().lost_rotation;
+    assert_ne!(a_lost, b_lost);
+    let (mut winner, mut loser, winning_password, losing_password, reissued) = if a_lost {
+        (
+            b,
+            a,
+            phone_password,
+            laptop_password,
+            (X, "notes", "from the laptop"),
+        )
+    } else {
+        (
+            a,
+            b,
+            laptop_password,
+            phone_password,
+            (Y, "title", "from the phone"),
+        )
+    };
+    assert!(matches!(
+        loser.write(vec![set(X, "title", "x")]),
+        Err(CoreError::KeyRotated)
+    ));
+    // Its own password opens only the losing key.
+    assert!(matches!(
+        loser.rejoin(Credential::Password(losing_password)),
+        Err(CoreError::WrongCredential)
+    ));
+    let old_client = loser.client_id();
+    loser
+        .rejoin(Credential::Password(winning_password))
+        .unwrap();
+    assert_ne!(loser.client_id(), old_client);
+    loser
+        .write(vec![set(X, "title", "after rejoining")])
+        .unwrap();
+
+    winner.sync().unwrap();
+    assert!(!loser.sync().unwrap().lost_rotation);
+    let (entry, name, value) = reissued;
+    assert_eq!(field(&winner, entry, name).as_deref(), Some(value));
+    assert_eq!(
+        field(&winner, X, "title").as_deref(),
+        Some("after rejoining")
+    );
+    // Both sides changed the password during the race. Re-issued on the shared
+    // history, the loser's change stays concurrent: a conflict, not an overwrite.
+    assert_eq!(field(&winner, X, "password").as_deref(), Some("<conflict>"));
+    assert_eq!(contents(&winner), contents(&loser));
+}
+
+#[test]
+fn purge_leaves_nothing_of_the_entry_behind() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    a.write(vec![
+        set(X, "password", "hunter2"),
+        set(Y, "title", "keep me"),
+    ])
+    .unwrap();
+    b.sync().unwrap();
+    b.write(vec![set(X, "notes", "more")]).unwrap();
+    b.write_snapshot().unwrap();
+
+    let report = a.purge(X, PASSWORD).unwrap();
+    assert_eq!(report.rotated.epoch, 1);
+    assert_eq!(
+        (
+            report.events_left,
+            report.snapshots_left,
+            report.snapshots_deleted
+        ),
+        (0, 0, 1)
+    );
+    assert_eq!(event_count(&store), 0);
+    assert_eq!(store.paths_in("snapshots").len(), 1);
+    assert!(!a.view().entries.contains_key(&X));
+
+    // B can't write a snapshot that brings X back; once caught up it agrees.
+    assert!(matches!(b.write_snapshot(), Err(CoreError::KeyRotated)));
+    let unlocked = unlock(&store, &b_local, Credential::Password(PASSWORD)).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    b.sync().unwrap();
+    assert_eq!(contents(&b), contents(&a));
+    let c_local = MemoryLocalStore::new();
+    let c = open(&store, &c_local, "Tablet");
+    assert!(!c.view().entries.contains_key(&X));
+    assert_eq!(field(&c, Y, "title").as_deref(), Some("keep me"));
+}
+
+#[test]
+fn a_vanished_epoch_record_is_a_rollback() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    for path in store.paths_in("epochs") {
+        store.remove(&path);
+    }
+    assert_eq!(alarm(a.sync()), AlarmKind::Rollback);
+}
+
+#[test]
+fn late_events_from_a_device_known_at_the_rotation_are_accepted_unflagged() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "before")]).unwrap();
+    a.sync().unwrap();
+    a.change_password(b"new password").unwrap();
+
+    // B was offline during the rotation and wrote under the key it had.
+    let seq = b.state.record.next_seq;
+    let late = seal_as(
+        &b,
+        b.client_id(),
+        seq,
+        &b.device,
+        vec![Op::SetField {
+            entry_id: X,
+            name: "title".into(),
+            value: Some(SecretBytes::from_slice(b"written offline")),
+            secret: false,
+        }],
+    );
+    store.put(&event_path(b.client_id(), seq), late);
+    a.sync().unwrap();
+    assert_eq!(field(&a, X, "title").as_deref(), Some("written offline"));
+    assert_eq!(a.review(), Review::default());
 }

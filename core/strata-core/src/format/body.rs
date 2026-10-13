@@ -100,6 +100,18 @@ pub enum Op {
 }
 
 impl Op {
+    /// The entry the op changes, for the ops that change one.
+    pub fn entry_id(&self) -> Option<&Id> {
+        match self {
+            Op::SetField { entry_id, .. }
+            | Op::DeleteEntry { entry_id }
+            | Op::KeepEntry { entry_id }
+            | Op::AddTag { entry_id, .. }
+            | Op::RemoveTag { entry_id, .. } => Some(entry_id),
+            Op::RetireClient { .. } | Op::RegisterDevice { .. } | Op::SetDeviceName { .. } => None,
+        }
+    }
+
     /// An explicit copy (field values are duplicated, see `SecretBytes::duplicate`).
     pub fn duplicate(&self) -> Op {
         match self {

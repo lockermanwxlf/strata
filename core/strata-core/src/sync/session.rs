@@ -1,7 +1,7 @@
 //! A sync session (spec §9.1, §9.4): an unlocked vault, its op set, and the rules
 //! for writing events and taking in other devices' events.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -12,12 +12,12 @@ use crate::crypto::sign::DeviceKey;
 use crate::error::{AlarmKind, CoreError, Result};
 use crate::format::Id;
 use crate::format::body::{Dot, EventBody, Op, RetainedOp, SnapshotBody, VectorClock};
-use crate::format::epoch::EpochRecord;
+use crate::format::epoch::{self, EpochRecord};
 use crate::format::event::{self, EventHeader, SealedEvent};
 use crate::format::names::FileName;
 use crate::format::snapshot::{self, SealedSnapshot, SnapshotHeader};
-use crate::keys::Keyring;
 use crate::keys::unlock::Unlocked;
+use crate::keys::{Keyring, MAX_KEY_FILES};
 use crate::local::{LocalState, LocalStore};
 use crate::merge::edit::Edit;
 use crate::merge::view::VaultView;
@@ -62,6 +62,9 @@ pub struct SyncReport {
     /// doesn't hold yet may cover them. Not an alarm, and not silence either: it
     /// can't be verified until the device unlocks again (it can't write meanwhile).
     pub integrity_unverified: bool,
+    /// Another device rotated to the same epoch at the same time and its key won.
+    /// This device can't write until it rejoins with that device's password.
+    pub lost_rotation: bool,
 }
 
 /// Snapshot once this many event files have piled up (`Session::snapshot_due`).
@@ -109,7 +112,8 @@ pub struct Session<'s> {
     local: &'s dyn LocalStore,
     vault_id: Id,
     keyring: Keyring,
-    epoch_files: Vec<Vec<u8>>,
+    /// Epoch records by path, refreshed on every sync.
+    epoch_files: BTreeMap<String, Vec<u8>>,
     state: LocalState,
     device: DeviceKey,
     device_name: String,
@@ -124,12 +128,15 @@ pub struct Session<'s> {
     alarm: Option<AlarmKind>,
     /// A newer epoch exists than this device holds (spec §7.2).
     rotated_away: bool,
-    /// Loaded snapshots: creator and watermark `(client, seq, hash)`.
-    snapshots: BTreeMap<Id, (Id, Watermark)>,
+    /// Loaded snapshots: the epoch they were sealed in, and their watermark.
+    snapshots: BTreeMap<Id, (u32, Watermark)>,
     /// A snapshot sealed under an epoch this device doesn't hold exists.
     unreadable_snapshot: bool,
     /// Event files at the last sync.
     event_files: usize,
+    /// Another device rotated to the same epoch concurrently and its key won
+    /// (spec §7.2): no writing until `rejoin`.
+    lost_rotation: bool,
 }
 
 impl<'s> Session<'s> {
@@ -156,7 +163,7 @@ impl<'s> Session<'s> {
             device: DeviceKey::from_seed(&unlocked.state.record.device_seed),
             rotated_away: unlocked.newer_epoch_unreachable,
             keyring: unlocked.keyring,
-            epoch_files: unlocked.epoch_files,
+            epoch_files: unlocked.epoch_files.into_iter().collect(),
             state: unlocked.state,
             device_name: device_name.to_string(),
             ops: OpSet::new(),
@@ -168,6 +175,7 @@ impl<'s> Session<'s> {
             snapshots: BTreeMap::new(),
             unreadable_snapshot: false,
             event_files: 0,
+            lost_rotation: false,
         })
     }
 
@@ -199,12 +207,8 @@ impl<'s> Session<'s> {
     pub fn sync(&mut self) -> Result<SyncReport> {
         let mut report = SyncReport::default();
         let mut paths = self.store.list()?;
-        let current = self.keyring.current();
-        if paths.iter().any(|p| {
-            matches!(FileName::parse(p), Some(FileName::Epoch { epoch, .. }) if epoch > current)
-        }) {
-            self.rotated_away = true;
-        }
+        self.refresh_epoch_files(&paths)?;
+        self.notice_newer_epoch(&paths);
         report.key_rotated = self.rotated_away;
         self.event_files = paths.iter().filter(|p| p.starts_with("events/")).count();
         report.event_files = self.event_files;
@@ -269,6 +273,9 @@ impl<'s> Session<'s> {
             self.check_high_water()?;
         }
         self.check_epoch_signatures(&mut report)?;
+        // Needs the device registry, so after the events are in.
+        self.lost_rotation = self.lost_to().is_some();
+        report.lost_rotation = self.lost_rotation;
         if self.applied.get(&self.state.client_id) >= self.state.record.next_seq {
             self.become_new_client()?;
             report.identity_reset = true;
@@ -281,15 +288,56 @@ impl<'s> Session<'s> {
     /// Writes `edits` as this device's next event (spec §8). The seq is persisted
     /// before the upload, and the event is kept as pending until the upload succeeds.
     pub fn write(&mut self, edits: Vec<Edit>) -> Result<()> {
+        let ops = self.ops.ops_for(edits);
+        self.write_ops(ops)
+    }
+
+    /// Refuses unless this device may write: no alarm, and it holds the newest key
+    /// (spec §7.2), which also means it didn't lose a concurrent rotation.
+    fn check_writable(&self) -> Result<()> {
         if let Some(kind) = self.alarm {
             return Err(CoreError::Alarm(kind));
         }
-        if self.rotated_away {
+        if self.rotated_away || self.lost_rotation {
             return Err(CoreError::KeyRotated);
         }
+        Ok(())
+    }
+
+    /// Sets `rotated_away` if the listing has an epoch record newer than this device's
+    /// key (spec §7.2).
+    fn notice_newer_epoch(&mut self, paths: &[String]) {
+        let current = self.keyring.current();
+        if paths.iter().any(|p| {
+            matches!(FileName::parse(p), Some(FileName::Epoch { epoch, .. }) if epoch > current)
+        }) {
+            self.rotated_away = true;
+        }
+    }
+
+    /// `check_writable` against a fresh listing: a device that hasn't synced since
+    /// another device rotated must not write under the old key (spec §7.2). That
+    /// matters most for purge, whose rotation is what stops a device that hasn't
+    /// caught up from snapshotting the purged entry back into the vault.
+    fn check_writable_now(&mut self) -> Result<()> {
+        self.check_writable()?;
+        let paths = self.store.list_dir("epochs")?;
+        self.notice_newer_epoch(&paths);
+        self.check_writable()
+    }
+
+    fn write_ops(&mut self, ops: Vec<Op>) -> Result<()> {
+        let clock = self.applied.clone();
+        self.write_event(ops, clock)
+    }
+
+    /// Writes `ops` as this device's next event, on top of `clock`: normally the
+    /// applied clock, but `rejoin` passes the history shared before a lost rotation,
+    /// so re-issued changes stay concurrent with what the winning side did since.
+    fn write_event(&mut self, mut ops: Vec<Op>, mut clock: VectorClock) -> Result<()> {
+        self.check_writable_now()?;
         let client = self.state.client_id;
         let seq = self.state.record.next_seq;
-        let mut ops = self.ops.ops_for(edits);
         if seq == 1 {
             ops.insert(
                 0,
@@ -311,7 +359,6 @@ impl<'s> Session<'s> {
                     "this device's previous event isn't applied; sync first",
                 ))?
         };
-        let mut clock = self.applied.clone();
         clock.observe(client, seq);
         let body = EventBody {
             hlc: hlc::next(self.latest_hlc, hlc::now_ms())?,
@@ -348,11 +395,7 @@ impl<'s> Session<'s> {
     /// What the user should review (spec §7.2, §9.2).
     pub fn review(&self) -> Review {
         let mut review = Review::default();
-        let records: Vec<_> = self
-            .epoch_files
-            .iter()
-            .filter_map(|bytes| EpochRecord::parse(bytes, &self.vault_id).ok())
-            .collect();
+        let records: Vec<_> = self.epoch_records().collect();
         for &client in self.registry.keys() {
             let Some(first) = self.events.get(&(client, 1)) else {
                 continue;
@@ -645,7 +688,7 @@ impl<'s> Session<'s> {
             }
         }
         self.snapshots
-            .insert(header.snapshot_id, (header.creator, body.watermark));
+            .insert(header.snapshot_id, (header.epoch, body.watermark));
         Ok(None)
     }
 
@@ -661,12 +704,7 @@ impl<'s> Session<'s> {
 
     /// Writes a snapshot of this device's reduced op set (spec §10.3).
     pub fn write_snapshot(&mut self) -> Result<Id> {
-        if let Some(kind) = self.alarm {
-            return Err(CoreError::Alarm(kind));
-        }
-        if self.rotated_away {
-            return Err(CoreError::KeyRotated);
-        }
+        self.check_writable_now()?;
         let client = self.state.client_id;
         if self.applied.get(&client) == 0 {
             // Others verify the snapshot with this device's key, so it must be registered.
@@ -722,7 +760,8 @@ impl<'s> Session<'s> {
             .record
             .snapshots
             .push((snapshot_id, hlc::now_ms()));
-        self.snapshots.insert(snapshot_id, (client, body.watermark));
+        self.snapshots
+            .insert(snapshot_id, (header.epoch, body.watermark));
         self.save()?;
         Ok(snapshot_id)
     }
@@ -732,9 +771,7 @@ impl<'s> Session<'s> {
     /// and this device's older snapshots they dominate. Never acts on another
     /// device's snapshot.
     pub fn collect_garbage(&mut self, grace_ms: u64) -> Result<GarbageReport> {
-        if let Some(kind) = self.alarm {
-            return Err(CoreError::Alarm(kind));
-        }
+        self.check_writable()?;
         let now = hlc::now_ms();
         let mut report = GarbageReport::default();
         // Newest first, so that of two snapshots with equal watermarks (each "dominating"
@@ -800,13 +837,99 @@ impl<'s> Session<'s> {
         }
     }
 
+    /// Reads the epoch records that appeared since the last look (spec §7.1). The map
+    /// follows the listing, and the pinned record must still be in it: records are
+    /// never deleted, so a missing one means the storage went back in time (§6.3).
+    fn refresh_epoch_files(&mut self, paths: &[String]) -> Result<()> {
+        let listed: Vec<(&String, FileName)> = paths
+            .iter()
+            .filter_map(|p| match FileName::parse(p) {
+                Some(name @ FileName::Epoch { .. }) => Some((p, name)),
+                _ => None,
+            })
+            .collect();
+        if listed.len() > MAX_KEY_FILES {
+            return Err(CoreError::rejected("vault", "too many epoch files"));
+        }
+        self.epoch_files
+            .retain(|path, _| paths.binary_search(path).is_ok());
+        for (path, name) in listed {
+            if self.epoch_files.contains_key(path) {
+                continue;
+            }
+            let bytes = match self.store.read(path, epoch::MAX_LEN) {
+                Ok(bytes) => bytes,
+                Err(CoreError::Rejected { .. }) => continue,
+                Err(e) => return Err(e),
+            };
+            match EpochRecord::parse(&bytes, &self.vault_id)
+                .and_then(|r| name.expect(r.file_name()))
+            {
+                Ok(()) => {}
+                Err(e @ CoreError::UpdateRequired { .. }) => return Err(e),
+                // Set aside, as at unlock: one bad file mustn't block the others.
+                Err(_) => continue,
+            }
+            self.epoch_files.insert(path.clone(), bytes);
+        }
+        let pin = self.state.pin;
+        if !self
+            .epoch_records()
+            .any(|r| r.epoch == pin.epoch && r.key_id == pin.key_id)
+        {
+            return Err(self.raise(AlarmKind::Rollback));
+        }
+        Ok(())
+    }
+
+    /// The epoch records that parse. Only parsed records are kept, so this drops none
+    /// in practice.
+    fn epoch_records(&self) -> impl Iterator<Item = EpochRecord<'_>> {
+        self.epoch_files
+            .values()
+            .filter_map(|bytes| EpochRecord::parse(bytes, &self.vault_id).ok())
+    }
+
+    /// The lowest key ID among records for `epoch` that beat `ours` (spec §7.2): a
+    /// lower key ID, signed by a registered device that isn't retired. Unverifiable
+    /// records never win, so storage alone can't make a device give up its key, and
+    /// neither can a revoked device holding the previous key.
+    fn competing_winner(&self, epoch: u32, ours: &[u8; 32]) -> Option<[u8; 32]> {
+        let retired: HashSet<Id> = self
+            .ops
+            .iter()
+            .filter_map(|r| match r.op {
+                Op::RetireClient { client_id, .. } => Some(client_id),
+                _ => None,
+            })
+            .collect();
+        self.epoch_records()
+            .filter(|r| r.epoch == epoch && r.key_id < *ours && !retired.contains(&r.creator))
+            .filter(|r| {
+                self.registry
+                    .get(&r.creator)
+                    .is_some_and(|pk| r.signature_valid(pk))
+            })
+            .map(|r| r.key_id)
+            .min()
+    }
+
+    /// The key that beat this device's current one in a concurrent rotation, if any.
+    /// Only the current epoch is contested (spec §7.2): rotating syncs first, so no
+    /// device builds on a key it has seen lose, and once an epoch is behind the
+    /// vault, no record written later can reopen it.
+    fn lost_to(&self) -> Option<[u8; 32]> {
+        let current = self.keyring.current();
+        if current == 0 {
+            return None; // a vault is created once
+        }
+        self.competing_winner(current, &self.keyring.current_keys().key_id)
+    }
+
     /// Epoch-record signatures (spec §6.4), checked once the creator is registered.
     fn check_epoch_signatures(&mut self, report: &mut SyncReport) -> Result<()> {
         let mut forged = false;
-        for bytes in &self.epoch_files {
-            let Ok(record) = EpochRecord::parse(bytes, &self.vault_id) else {
-                continue;
-            };
+        for record in self.epoch_records() {
             match self.registry.get(&record.creator) {
                 Some(pk) if !record.signature_valid(pk) => forged = true,
                 Some(_) => {}
@@ -905,6 +1028,10 @@ impl<'s> Session<'s> {
         self.local.save(&self.vault_id, &self.state.seal(pin_keys)?)
     }
 }
+
+mod rotate;
+
+pub use rotate::{PurgeReport, RecoveryChoice, Rotated};
 
 #[cfg(test)]
 mod tests;

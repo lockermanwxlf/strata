@@ -90,6 +90,22 @@ impl OpSet {
         }
     }
 
+    /// A copy holding duplicates of the ops `keep` accepts. Purge and revert build
+    /// the vault without some ops this way; the merge itself only drops ops in
+    /// `reduce`.
+    pub(crate) fn filtered(&self, mut keep: impl FnMut(&OpRecord) -> bool) -> OpSet {
+        let mut out = OpSet::new();
+        for record in self.ops.values().filter(|r| keep(r)) {
+            out.insert(OpRecord {
+                dot: record.dot,
+                hlc: record.hlc,
+                clock: Arc::clone(&record.clock),
+                op: record.op.duplicate(),
+            });
+        }
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.ops.len()
     }
