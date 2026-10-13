@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
-use crate::crypto::SecretBytes;
+use crate::crypto::{SecretBytes, generate};
 use crate::error::{AlarmKind, CoreError};
 use crate::format::Id;
 use crate::format::body::Op;
@@ -337,6 +337,21 @@ pub fn password_strength(password: Vec<u8>) -> Result<StrengthEstimate> {
         guesses_log10: s.guesses_log10,
         warn: s.warn,
     })
+}
+
+/// A random password of `length` (8 to 128) characters: letters and digits, plus
+/// symbols if asked. The caller zeroes the result.
+#[uniffi::export]
+pub fn generate_password(length: u32, symbols: bool) -> Result<Vec<u8>> {
+    let password = generate::password(length as usize, symbols)?;
+    Ok(password.expose().to_vec())
+}
+
+/// Where this device keeps local state on desktop systems (spec §11), or `None` if
+/// the platform's usual variable isn't set. Android passes its app directory instead.
+#[uniffi::export]
+pub fn default_state_dir() -> Option<String> {
+    FsLocalStore::default_dir().and_then(|d| d.to_str().map(str::to_string))
 }
 
 /// A fresh entry ID. The entry exists once its first field is set.

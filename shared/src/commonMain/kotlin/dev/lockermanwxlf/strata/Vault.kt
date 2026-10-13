@@ -93,6 +93,12 @@ object StrataCore {
     suspend fun passwordStrength(password: ByteArray): StrengthEstimate = nativePasswordStrength(password)
 
     fun newEntryId(): String = nativeNewEntryId()
+
+    /** A random password: letters and digits, plus symbols if asked. Wipe it when used. */
+    fun generatePassword(length: Int, symbols: Boolean): ByteArray = nativeGeneratePassword(length, symbols)
+
+    /** The usual folder for this device's local state on desktop systems. */
+    fun defaultStateDir(): String? = nativeDefaultStateDir()
 }
 
 // Implemented per platform on top of the generated bindings (NativeVault.kt).
@@ -110,6 +116,10 @@ internal expect fun nativeOpenVault(vaultDir: String, stateDir: String, deviceNa
 internal expect suspend fun nativePasswordStrength(password: ByteArray): StrengthEstimate
 
 internal expect fun nativeNewEntryId(): String
+
+internal expect fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteArray
+
+internal expect fun nativeDefaultStateDir(): String?
 
 /** Overwrites the array with zeros. */
 fun ByteArray.wipe() = fill(0)

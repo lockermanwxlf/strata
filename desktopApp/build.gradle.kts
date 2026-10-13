@@ -10,6 +10,7 @@ dependencies {
     implementation(project(":shared"))
     implementation(compose.desktop.currentOs)
     implementation(libs.kotlinx.coroutines.swing)
+    testImplementation(libs.kotlin.test)
 }
 
 compose.desktop {

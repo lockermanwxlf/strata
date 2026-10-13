@@ -6,7 +6,7 @@ Cross-platform password vault. Targets: Windows 11, macOS, Linux, Android. iOS i
 
 - **`core/strata-core` (Rust):** everything security-critical: vault format, crypto, CRDT merge, sync, slot policy. Secrets live in Rust memory and are wiped with `zeroize`. The core's global allocator (`alloc.rs`) also zeroes every heap block on free, which covers copies `zeroize` can't reach: grown `Vec`s and UniFFI's transfer buffers.
 - **UniFFI** generates the Kotlin bindings (`dev.lockermanwxlf.strata.core.ffi`) from the built library. Never edit generated code. Change the Rust and rebuild.
-- **`shared` (Kotlin Multiplatform + Compose Multiplatform):** UI in `commonMain`. Common code uses the platform-neutral API in `commonMain/.../Vault.kt` (`StrataCore`, `VaultHandle`). Its one implementation, `src/jna/kotlin/.../NativeVault.kt`, compiles into both `jvmMain` and `androidMain` together with the generated bindings (they use JNA), and runs every call on `Dispatchers.IO`.
+- **`shared` (Kotlin Multiplatform + Compose Multiplatform):** UI in `commonMain`: `ui/VaultController.kt` holds the state and makes every vault call; the screens only render it. Platform specifics (folder picker, clipboard, secure window) come in through `AppHost`, implemented in `desktopApp` and `androidApp`. Common code uses the platform-neutral API in `commonMain/.../Vault.kt` (`StrataCore`, `VaultHandle`). Its one implementation, `src/jna/kotlin/.../NativeVault.kt`, compiles into both `jvmMain` and `androidMain` together with the generated bindings (they use JNA), and runs every call on `Dispatchers.IO`.
 - **`desktopApp`:** Compose Desktop entry point and packaging (jpackage).
 - **`androidApp`:** Android entry point. AGP 9 forbids an application module from also being a KMP module, which is why it's separate. It cross-compiles the core with cargo-ndk into jniLibs.
 
@@ -65,7 +65,7 @@ vault/
   - parser fuzzing
   - fixed test vectors
   - negative tests: tampered events, swapped slots, replayed events, and rolled-back sequence numbers must each fail loudly
-- Never convert secrets to Kotlin `String`. Use `ByteArray`/`CharArray` and zero them.
+- Never convert secrets to Kotlin `String`. Use `ByteArray`/`CharArray` and zero them. Password fields go straight from Compose's `TextFieldState` to UTF-8 bytes (`takeUtf8` in `ui/Secrets.kt`), and existing secrets are never pre-filled into an editor. The only exceptions are drawing a revealed value on screen and handing it to the clipboard, because those platform APIs take nothing else: keep such strings in screen state that dies with the screen, and go through `SecretClipboard`, which marks the copy sensitive (Android) or keeps it out of clipboard history (Windows) and clears it after 30 seconds.
 
 ## Commands
 

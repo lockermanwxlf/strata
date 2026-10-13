@@ -98,6 +98,12 @@ kotlin {
                 implementation(libs.kotlin.test)
             }
         }
+        jvmTest {
+            dependencies {
+                // Skia for this OS, so tests can render screens to images (ScreenshotTest).
+                implementation(compose.desktop.currentOs)
+            }
+        }
         jvmMain {
             // The bindings use JNA and java.nio, so they compile per JVM-based target
             // rather than in commonMain.

@@ -421,6 +421,32 @@ Implementation notes:
 - **Android:** reuse the shared UI. Release builds keep `FLAG_SECURE`, and the recovery-key screen especially needs it.
 - **Key fingerprint:** if OPEN-6 is approved, show the key-ID fingerprint at enrollment.
 
+**Status: done (2026-10-12), except slot management (Phase 10) and the OPEN-6 fingerprint (still open).**
+
+- **Structure:**
+  - `ui/VaultController.kt` holds the state and a small screen stack, and makes every vault call.
+  - The screens (`StartScreens`, `EntryScreens`, `SettingsScreens`) only render.
+  - `AppHost` supplies the platform parts.
+- **Screens:**
+  - **M1:** welcome, create (with the weak-password warning), recovery words with a three-word check, unlock (password or words), the entry list with search, detail with reveal and copy, and the editor with a generator and custom fields.
+  - **M2:** the trash, unanswered deletes, conflict resolution, the alarm screen, and banners for a key changed elsewhere or a lost rotation.
+  - **M3:** settings, change password, new recovery words, devices (rename, revoke), and review of flagged changes.
+- **Locking:** after 5 minutes without input, and 30 seconds after going to the background (Android). Background sync runs every 60 seconds.
+- **Clipboard:** cleared after 30 seconds unless something else was copied since. Marked sensitive on Android. On Windows it carries the formats that keep it out of clipboard history and the cloud clipboard, checked by a Windows-only test.
+- **Secrets in the UI:**
+  - Password fields are read straight into UTF-8 bytes and cleared.
+  - Secret values are never pre-filled into the editor.
+  - Revealed values hide after 30 seconds.
+  - Recovery words are wiped when their screen is left or the app locks.
+- **Desktop:** pick the vault folder with a folder chooser. The last folder is remembered in `ui.properties` next to the local state.
+- **Android:** the vault lives in the app-specific folder until Storage Access Framework support. Rotation doesn't recreate the activity, so it doesn't lock. The recovery-words screen is `FLAG_SECURE` even in debug builds.
+- **Core additions:** `generate_password` (CSPRNG, rejection sampling) and `default_state_dir`.
+- **Tests:**
+  - `ControllerTest` drives the controller's flows against the real library.
+  - `ScreenshotTest` composes every screen and renders it to `shared/build/screenshots`.
+  - `ClipboardTest` (desktop) checks the clipboard-history formats.
+- **Not yet:** a desktop equivalent of `FLAG_SECURE` (Windows has `SetWindowDisplayAffinity`), and choosing a folder on Android.
+
 ### Phase 10: Platform protectors (L) · spec §6.2, CLAUDE.md "Platform protectors"
 
 One at a time, each under 200 lines with no policy logic, each reporting its `ProtectorCaps` honestly:

@@ -15,6 +15,8 @@ import dev.lockermanwxlf.strata.core.ffi.EntryEdit as FfiEntryEdit
 import dev.lockermanwxlf.strata.core.ffi.RotationSummary as FfiRotationSummary
 import dev.lockermanwxlf.strata.core.ffi.SyncSummary as FfiSyncSummary
 import dev.lockermanwxlf.strata.core.ffi.createVault as ffiCreateVault
+import dev.lockermanwxlf.strata.core.ffi.defaultStateDir as ffiDefaultStateDir
+import dev.lockermanwxlf.strata.core.ffi.generatePassword as ffiGeneratePassword
 import dev.lockermanwxlf.strata.core.ffi.newEntryId as ffiNewEntryId
 import dev.lockermanwxlf.strata.core.ffi.passwordStrength as ffiPasswordStrength
 
@@ -42,6 +44,11 @@ internal actual suspend fun nativePasswordStrength(password: ByteArray): Strengt
 }
 
 internal actual fun nativeNewEntryId(): String = mapped { ffiNewEntryId() }
+
+internal actual fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteArray =
+    mapped { ffiGeneratePassword(length.toUInt(), symbols) }
+
+internal actual fun nativeDefaultStateDir(): String? = ffiDefaultStateDir()
 
 private class NativeVault(private val vault: Vault) : VaultHandle {
     override val isLocked: Boolean

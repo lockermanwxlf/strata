@@ -1,0 +1,198 @@
+package dev.lockermanwxlf.strata
+
+import dev.lockermanwxlf.strata.ui.Screen
+import dev.lockermanwxlf.strata.ui.VaultController
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlin.io.path.deleteRecursively
+import kotlin.io.path.pathString
+import kotlin.test.AfterTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+
+/** A host whose folder picker, clipboard and screen flag are under the test's control. */
+internal class FakeHost(root: Path) : AppHost {
+    override val stateDir = root.resolve("state").pathString
+    override val defaultDeviceName = "Test machine"
+    override var lastVaultFolder: String? = null
+    var nextFolder: String? = null
+    var secure = false
+    val copied = mutableListOf<String>()
+    var clears = 0
+
+    override suspend fun chooseVaultFolder(forNewVault: Boolean) = nextFolder
+
+    override fun isVault(folder: String) = File(folder, "strata-vault").isFile
+
+    override val clipboard = object : SecretClipboard {
+        override fun copy(value: ByteArray) {
+            copied += value.decodeToString()
+            value.fill(0)
+        }
+
+        override fun clearIfStillOurs() {
+            clears++
+        }
+    }
+
+    override fun setSecureScreen(secure: Boolean) {
+        this.secure = secure
+    }
+}
+
+/** The controller's flows against the real library, without any UI. */
+@OptIn(kotlin.io.path.ExperimentalPathApi::class)
+class ControllerTest {
+    private val root: Path = Files.createTempDirectory("strata-ui-test")
+    private val vaultDir = root.resolve("vault").also { Files.createDirectories(it) }.pathString
+    private val host = FakeHost(root).apply { nextFolder = vaultDir }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    @AfterTest
+    fun cleanUp() {
+        scope.cancel()
+        root.deleteRecursively()
+    }
+
+    private fun controller(
+        idle: Duration = 5.minutes,
+        background: Duration = 5.minutes,
+        clipboard: Duration = 5.minutes,
+    ) = VaultController(host, scope, idle, background, clipboard)
+
+    private fun pw(text: String = "correct horse battery staple") = text.encodeToByteArray()
+
+    /** Creates a vault through the controller and dismisses the recovery words. */
+    private suspend fun created(c: VaultController = controller()): VaultController {
+        c.chooseNewVault().join()
+        assertEquals(Screen.Create(vaultDir), c.screen)
+        c.create(vaultDir, pw()).join()
+        val words = assertIs<Screen.RecoveryWords>(c.screen)
+        assertEquals(24, words.words.decodeToString().split(' ').size)
+        c.finishRecoveryWords(words)
+        assertTrue(words.words.all { it == 0.toByte() }, "the words are wiped")
+        assertEquals(Screen.Entries, c.screen)
+        return c
+    }
+
+    private suspend fun eventually(what: String, check: () -> Boolean) {
+        repeat(200) {
+            if (check()) return
+            delay(10)
+        }
+        throw AssertionError("timed out waiting for $what")
+    }
+
+    @Test
+    fun createThenStartAgainAtTheUnlockScreen() = runBlocking<Unit> {
+        created()
+        assertEquals(vaultDir, host.lastVaultFolder)
+
+        val next = controller()
+        next.start()
+        assertEquals(Screen.Unlock, next.screen)
+        next.unlock(pw("wrong")).join()
+        assertEquals(Screen.Unlock, next.screen)
+        assertNotNull(next.message)
+        next.unlock(pw()).join()
+        assertEquals(Screen.Entries, next.screen)
+        assertTrue(next.unlocked)
+    }
+
+    @Test
+    fun editSearchCopyAndTrash() = runBlocking<Unit> {
+        val c = created(controller(clipboard = 50.milliseconds))
+        val bank = c.newEntryId()
+        val mail = c.newEntryId()
+        c.save(
+            listOf(
+                EntryEdit.SetField(bank, "title", "Bank".encodeToByteArray()),
+                EntryEdit.SetField(bank, "password", "hunter2".encodeToByteArray()),
+                EntryEdit.AddTag(bank, "money"),
+                EntryEdit.SetField(mail, "title", "Mail".encodeToByteArray()),
+            ),
+        ) {}.join()
+        assertEquals(listOf("Bank", "Mail"), c.visibleEntries.map { it.title })
+        c.query = "MON"
+        assertEquals(listOf("Bank"), c.visibleEntries.map { it.title }, "tags match too, ignoring case")
+        c.query = ""
+
+        c.copy(bank, "password").join()
+        assertEquals(listOf("hunter2"), host.copied)
+        eventually("the clipboard to clear") { host.clears == 1 }
+
+        c.open(Screen.Detail(mail))
+        c.delete(mail).join()
+        assertEquals(Screen.Entries, c.screen)
+        assertEquals(listOf("Mail"), c.trash.map { it.title })
+        c.keep(mail).join()
+        assertTrue(c.trash.isEmpty())
+    }
+
+    @Test
+    fun idleAndBackgroundLock() = runBlocking<Unit> {
+        val c = created(controller(idle = 50.milliseconds, background = 50.milliseconds))
+        c.touch()
+        c.checkIdle()
+        assertTrue(c.unlocked, "not idle yet")
+        delay(100)
+        c.checkIdle()
+        eventually("the idle lock") { !c.unlocked && c.screen == Screen.Unlock }
+
+        c.unlock(pw()).join()
+        c.backgrounded()
+        c.foregrounded()
+        delay(100)
+        assertTrue(c.unlocked, "coming back in time cancels the lock")
+        c.backgrounded()
+        eventually("the background lock") { !c.unlocked }
+        assertTrue(c.entries.isEmpty(), "decrypted entries go with the lock")
+    }
+
+    @Test
+    fun lockingWipesRecoveryWordsStillOnScreen() = runBlocking<Unit> {
+        val c = controller()
+        c.chooseNewVault().join()
+        c.create(vaultDir, pw()).join()
+        val words = assertIs<Screen.RecoveryWords>(c.screen)
+        c.lock().join()
+        assertTrue(words.words.all { it == 0.toByte() })
+        assertEquals(Screen.Unlock, c.screen)
+    }
+
+    @Test
+    fun changePasswordThenUnlockWithIt() = runBlocking<Unit> {
+        val c = created()
+        c.open(Screen.Settings)
+        c.open(Screen.ChangePassword)
+        c.changePassword(pw("a new password")).join()
+        assertEquals(Screen.Settings, c.screen)
+        c.lock().join()
+        c.unlock(pw()).join()
+        assertTrue(!c.unlocked)
+        c.unlock(pw("a new password")).join()
+        assertTrue(c.unlocked)
+    }
+
+    @Test
+    fun openingAFolderWithoutAVaultSaysSo() = runBlocking<Unit> {
+        val c = controller()
+        host.nextFolder = root.resolve("empty").also { Files.createDirectories(it) }.pathString
+        c.chooseExistingVault().join()
+        assertEquals(Screen.Welcome, c.screen)
+        assertNotNull(c.message)
+    }
+}
