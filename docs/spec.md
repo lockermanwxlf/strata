@@ -109,7 +109,7 @@ There are two layers.
 ```
 
 - Clients only **create** files, never modify them. Deletions happen only in the cases listed: removing slots after rotation (§7), garbage collection (§10.3), and purge (§10.4).
-- Writers create each file under a temporary name beginning with `.` and then rename it into place. When the backend supports it, they use create-exclusive and never overwrite. If the target name already exists, the writer MUST NOT overwrite it and MUST raise a fork alarm (§9.4).
+- Writers create each file under a temporary name beginning with `.` and then rename it into place. When the backend supports it, they use create-exclusive and never overwrite. If the target name already exists, the writer MUST NOT overwrite it and MUST raise a fork alarm (§9.4). A backend that can't refuse a taken name (one that picks another name, or keeps two files with the same name, as some Android storage providers do) is checked after the write instead: unless the writer's file ended up under exactly the target name and is the only file with it, the writer removes its file and treats the name as taken.
 - Readers ignore names that don't exactly match the patterns above. That covers temporary files and the conflict copies that sync providers create.
 - The values inside a file MUST match its name: client ID, seq, epoch, slot ID or snapshot ID. A mismatch is rejected.
 

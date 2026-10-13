@@ -107,6 +107,18 @@ object StrataCore {
     fun openVault(vaultDir: String, stateDir: String, deviceName: String): VaultHandle =
         nativeOpenVault(vaultDir, stateDir, deviceName)
 
+    /** [createVault] in a folder the platform reaches through its own API. */
+    suspend fun createVault(
+        folder: VaultFolder,
+        stateDir: String,
+        password: ByteArray,
+        deviceName: String,
+    ): CreatedVault = nativeCreateVaultIn(folder, stateDir, password, deviceName)
+
+    /** [openVault] for a folder the platform reaches through its own API. */
+    fun openVault(folder: VaultFolder, stateDir: String, deviceName: String): VaultHandle =
+        nativeOpenVaultIn(folder, stateDir, deviceName)
+
     /** The weak-password estimate. Advisory: any password is allowed. */
     suspend fun passwordStrength(password: ByteArray): StrengthEstimate = nativePasswordStrength(password)
 
@@ -150,8 +162,47 @@ interface DeviceProtector {
     }
 }
 
+/**
+ * A vault folder the platform reaches through its own API instead of a path: on
+ * Android, a folder picked through the Storage Access Framework. Paths are relative to
+ * the vault: `strata-vault`, or `<dir>/<name>` in one of the vault's directories.
+ *
+ * The core checks every path before calling, and checks names and sizes again on what
+ * comes back, so an implementation only moves bytes. Calls come from a background
+ * thread. Failures other than a [VaultFolderException] reach the user as storage errors.
+ */
+interface VaultFolder {
+    /** The names of the files directly in [dir] (`""` is the vault root); empty if it doesn't exist. */
+    fun list(dir: String): List<String>
+
+    /** The file's bytes. [VaultFolderException.Kind.TOO_LARGE] past [maxLen] bytes, without reading them all. */
+    fun read(path: String, maxLen: Long): ByteArray
+
+    /**
+     * Creates the file, and its directory if needed. [VaultFolderException.Kind.ALREADY_EXISTS]
+     * if the name is taken: never overwrite, never settle for another name, and never
+     * leave a second file with the same name.
+     */
+    fun create(path: String, bytes: ByteArray)
+
+    fun delete(path: String)
+}
+
+class VaultFolderException(val kind: Kind, message: String) : Exception(message) {
+    enum class Kind { ALREADY_EXISTS, NOT_FOUND, TOO_LARGE }
+}
+
 // Implemented per platform on top of the generated bindings (NativeVault.kt).
 internal expect fun nativeVersion(): String
+
+internal expect suspend fun nativeCreateVaultIn(
+    folder: VaultFolder,
+    stateDir: String,
+    password: ByteArray,
+    deviceName: String,
+): CreatedVault
+
+internal expect fun nativeOpenVaultIn(folder: VaultFolder, stateDir: String, deviceName: String): VaultHandle
 
 internal expect suspend fun nativeCreateVault(
     vaultDir: String,

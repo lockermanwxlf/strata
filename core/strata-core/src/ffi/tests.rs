@@ -413,3 +413,79 @@ fn without_the_secret_a_stale_slot_is_dropped() {
     vault.change_password(b"second password".to_vec()).unwrap();
     assert!(vault.local_unlocks().unwrap().is_empty());
 }
+
+/// A platform folder (as Android's SAF folder would be) over a real directory.
+struct DirFolder(FsStore);
+
+impl ForeignFolder for DirFolder {
+    fn list(&self, dir: String) -> Result<Vec<String>, crate::sync::FolderError> {
+        let paths = if dir.is_empty() {
+            self.0.list()
+        } else {
+            self.0.list_dir(&dir)
+        };
+        Ok(paths
+            .map_err(folder_error)?
+            .into_iter()
+            .filter_map(|p| match dir.as_str() {
+                "" => (!p.contains('/')).then_some(p),
+                dir => p.strip_prefix(&format!("{dir}/")).map(str::to_string),
+            })
+            .collect())
+    }
+
+    fn read(&self, path: String, max_len: u64) -> Result<Vec<u8>, crate::sync::FolderError> {
+        self.0.read(&path, max_len as usize).map_err(folder_error)
+    }
+
+    fn create(&self, path: String, bytes: Vec<u8>) -> Result<(), crate::sync::FolderError> {
+        self.0.create(&path, &bytes).map_err(folder_error)
+    }
+
+    fn delete(&self, path: String) -> Result<(), crate::sync::FolderError> {
+        self.0.delete(&path).map_err(folder_error)
+    }
+}
+
+fn folder_error(e: CoreError) -> crate::sync::FolderError {
+    use crate::sync::FolderError;
+    match e {
+        CoreError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            FolderError::AlreadyExists
+        }
+        CoreError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => FolderError::NotFound,
+        e => FolderError::Failed {
+            detail: e.to_string(),
+        },
+    }
+}
+
+#[test]
+fn a_platform_folder_holds_the_same_vault_as_a_directory() {
+    let dirs = Dirs::new();
+    let folder = || Arc::new(DirFolder(FsStore::new(dirs.vault()))) as Arc<dyn ForeignFolder>;
+    let created = create_vault_in_folder(
+        folder(),
+        dirs.state("phone"),
+        PASSWORD.to_vec(),
+        "Phone".into(),
+    )
+    .unwrap();
+    let id = new_entry_id().unwrap();
+    created
+        .vault
+        .apply(vec![set(&id, "title", b"From the phone")])
+        .unwrap();
+
+    // The laptop opens the same files as a plain directory and writes back.
+    let laptop = dirs.open("laptop");
+    assert_eq!(
+        laptop.entries().unwrap()[0].title.as_deref(),
+        Some("From the phone")
+    );
+    laptop.apply(vec![set(&id, "user", b"me")]).unwrap();
+
+    let phone = Vault::open_folder(folder(), dirs.state("phone"), "Phone".into()).unwrap();
+    phone.unlock_password(PASSWORD.to_vec()).unwrap();
+    assert_eq!(phone.reveal(id.clone(), "user".into()).unwrap(), b"me");
+}

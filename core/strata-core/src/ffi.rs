@@ -29,7 +29,7 @@ use crate::merge::view::{EntryView, Field};
 use crate::policy::check_platform_policy;
 use crate::protector::{PlatformProtector, ProtectorError};
 use crate::sync::session::{GC_GRACE_MS, PurgeReport, Rotated, SessionOf, SyncReport};
-use crate::sync::{FsStore, RemoteStore};
+use crate::sync::{ForeignFolder, ForeignStore, FsStore, RemoteStore};
 
 type FfiSession = SessionOf<Arc<dyn RemoteStore>, Arc<dyn LocalStore>>;
 
@@ -350,8 +350,25 @@ pub fn create_vault(
     password: Vec<u8>,
     device_name: String,
 ) -> Result<NewVault> {
+    let store = Arc::new(FsStore::new(vault_dir));
+    create_in(Vault::new(store, state_dir, device_name)?, password)
+}
+
+/// `create_vault` in a folder the platform reaches through its own API (Android's
+/// Storage Access Framework).
+#[uniffi::export]
+pub fn create_vault_in_folder(
+    folder: Arc<dyn ForeignFolder>,
+    state_dir: String,
+    password: Vec<u8>,
+    device_name: String,
+) -> Result<NewVault> {
+    let store = Arc::new(ForeignStore::new(folder));
+    create_in(Vault::new(store, state_dir, device_name)?, password)
+}
+
+fn create_in(vault: Arc<Vault>, password: Vec<u8>) -> Result<NewVault> {
     let password = Zeroizing::new(password);
-    let vault = Vault::new(vault_dir, state_dir, device_name)?;
     let created = create_vault_files(&*vault.store, &*vault.local, &password, &vault.device_name)?;
     vault.unlock_with(Credential::Password(&password))?;
     Ok(NewVault {
@@ -393,13 +410,17 @@ pub fn new_entry_id() -> Result<String> {
 }
 
 impl Vault {
-    fn new(vault_dir: String, state_dir: String, device_name: String) -> Result<Arc<Self>> {
+    fn new(
+        store: Arc<dyn RemoteStore>,
+        state_dir: String,
+        device_name: String,
+    ) -> Result<Arc<Self>> {
         Op::SetDeviceName {
             name: device_name.clone(),
         }
         .validate("device name")?;
         Ok(Arc::new(Self {
-            store: Arc::new(FsStore::new(vault_dir)),
+            store,
             local: Arc::new(FsLocalStore::new(state_dir)),
             device_name,
             session: Mutex::new(None),
@@ -476,7 +497,18 @@ impl Vault {
     /// joins the vault (its first change registers it).
     #[uniffi::constructor]
     pub fn open(vault_dir: String, state_dir: String, device_name: String) -> Result<Arc<Self>> {
-        Self::new(vault_dir, state_dir, device_name)
+        Self::new(Arc::new(FsStore::new(vault_dir)), state_dir, device_name)
+    }
+
+    /// `open` for a folder the platform reaches through its own API (Android's
+    /// Storage Access Framework).
+    #[uniffi::constructor]
+    pub fn open_folder(
+        folder: Arc<dyn ForeignFolder>,
+        state_dir: String,
+        device_name: String,
+    ) -> Result<Arc<Self>> {
+        Self::new(Arc::new(ForeignStore::new(folder)), state_dir, device_name)
     }
 
     pub fn is_locked(&self) -> bool {

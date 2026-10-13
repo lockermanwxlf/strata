@@ -62,6 +62,32 @@ macro_rules! delegate_remote_store {
 }
 delegate_remote_store!(&T, std::sync::Arc<T>);
 
+/// The directories that hold vault files (spec §5). Nothing else is listed.
+pub(crate) const DIRS: [&str; 4] = ["epochs", "slots", "events", "snapshots"];
+
+/// Splits a vault-relative path into its directory (`None` for the vault root) and
+/// file name. Only plain names and the known directories are accepted, so a store
+/// can never be pointed outside the vault.
+pub(crate) fn split_path(path: &str) -> Result<(Option<&str>, &str)> {
+    let invalid = || CoreError::rejected("vault path", "not a vault file path");
+    let mut parts = path.split('/');
+    let (dir, name) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(name), None, None) => (None, name),
+        (Some(dir), Some(name), None) if DIRS.contains(&dir) => (Some(dir), name),
+        _ => return Err(invalid()),
+    };
+    if !is_plain_name(name) {
+        return Err(invalid());
+    }
+    Ok((dir, name))
+}
+
+/// A file name a store may hold: not empty, not `.`/`..`, no separators or drive
+/// letters. Names starting with `.` are valid but hidden (temporary files).
+pub(crate) fn is_plain_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', ':', '\0'])
+}
+
 /// An in-memory vault directory. Tests use `put` and `remove` to act as an attacker
 /// who controls the storage.
 #[derive(Debug, Default)]

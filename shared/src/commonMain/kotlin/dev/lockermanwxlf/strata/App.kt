@@ -85,6 +85,7 @@ fun App(controller: VaultController) {
 @Composable
 private fun ScreenFor(c: VaultController) {
     when (val s = c.screen) {
+        Screen.Starting -> {}
         Screen.Welcome -> WelcomeScreen(c)
         is Screen.Create -> CreateScreen(c, s.folder)
         is Screen.RecoveryWords -> RecoveryWordsScreen(c, s)

@@ -13,11 +13,9 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::RemoteStore;
+use super::store::{DIRS, split_path};
 use crate::crypto::fill_random;
 use crate::error::{CoreError, Result};
-
-/// The directories that hold vault files (spec §5). Nothing else is listed.
-const DIRS: [&str; 4] = ["epochs", "slots", "events", "snapshots"];
 
 #[derive(Debug, Clone)]
 pub struct FsStore {
@@ -29,24 +27,11 @@ impl FsStore {
         Self { root: root.into() }
     }
 
-    /// The real path of a vault-relative path. Only plain names and the known
-    /// directories are accepted, so a path can never point outside the vault.
+    /// The real path of a vault-relative path (see `split_path`).
     fn resolve(&self, path: &str) -> Result<PathBuf> {
-        let invalid = || CoreError::rejected("vault path", "not a vault file path");
-        let mut parts = path.split('/');
-        let (dir, name) = match (parts.next(), parts.next(), parts.next()) {
-            (Some(name), None, None) => (None, name),
-            (Some(dir), Some(name), None) if DIRS.contains(&dir) => (Some(dir), name),
-            _ => return Err(invalid()),
-        };
-        let safe =
-            !name.is_empty() && name != "." && name != ".." && !name.contains(['\\', ':', '\0']);
-        if !safe {
-            return Err(invalid());
-        }
-        Ok(match dir {
-            Some(dir) => self.root.join(dir).join(name),
-            None => self.root.join(name),
+        Ok(match split_path(path)? {
+            (Some(dir), name) => self.root.join(dir).join(name),
+            (None, name) => self.root.join(name),
         })
     }
 }

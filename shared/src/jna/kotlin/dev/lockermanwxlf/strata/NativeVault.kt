@@ -6,6 +6,8 @@ package dev.lockermanwxlf.strata
 
 import dev.lockermanwxlf.strata.StrataException.Reason
 import dev.lockermanwxlf.strata.core.ffi.AlarmKind
+import dev.lockermanwxlf.strata.core.ffi.FolderException
+import dev.lockermanwxlf.strata.core.ffi.ForeignFolder
 import dev.lockermanwxlf.strata.core.ffi.PlatformProtector
 import dev.lockermanwxlf.strata.core.ffi.Vault
 import dev.lockermanwxlf.strata.core.ffi.VaultException
@@ -16,6 +18,7 @@ import dev.lockermanwxlf.strata.core.ffi.EntryEdit as FfiEntryEdit
 import dev.lockermanwxlf.strata.core.ffi.RotationSummary as FfiRotationSummary
 import dev.lockermanwxlf.strata.core.ffi.SyncSummary as FfiSyncSummary
 import dev.lockermanwxlf.strata.core.ffi.createVault as ffiCreateVault
+import dev.lockermanwxlf.strata.core.ffi.createVaultInFolder as ffiCreateVaultInFolder
 import dev.lockermanwxlf.strata.core.ffi.defaultStateDir as ffiDefaultStateDir
 import dev.lockermanwxlf.strata.core.ffi.generatePassword as ffiGeneratePassword
 import dev.lockermanwxlf.strata.core.ffi.newEntryId as ffiNewEntryId
@@ -42,6 +45,46 @@ internal actual suspend fun nativeCreateVault(
 
 internal actual fun nativeOpenVault(vaultDir: String, stateDir: String, deviceName: String): VaultHandle =
     mapped { NativeVault(Vault.open(vaultDir, stateDir, deviceName)) }
+
+internal actual suspend fun nativeCreateVaultIn(
+    folder: VaultFolder,
+    stateDir: String,
+    password: ByteArray,
+    deviceName: String,
+): CreatedVault = background {
+    consuming(password) {
+        val created = ffiCreateVaultInFolder(NativeFolder(folder), stateDir, password, deviceName)
+        CreatedVault(NativeVault(created.vault), created.recoveryWords)
+    }
+}
+
+internal actual fun nativeOpenVaultIn(folder: VaultFolder, stateDir: String, deviceName: String): VaultHandle =
+    mapped { NativeVault(Vault.openFolder(NativeFolder(folder), stateDir, deviceName)) }
+
+/** Hands a platform folder to the core, with its failures as the core expects them. */
+private class NativeFolder(private val folder: VaultFolder) : ForeignFolder {
+    override fun list(dir: String): List<String> = reported { folder.list(dir) }
+
+    override fun read(path: String, maxLen: ULong): ByteArray =
+        reported { folder.read(path, maxLen.coerceAtMost(Long.MAX_VALUE.toULong()).toLong()) }
+
+    override fun create(path: String, bytes: ByteArray) = reported { folder.create(path, bytes) }
+
+    override fun delete(path: String) = reported { folder.delete(path) }
+
+    private inline fun <T> reported(block: () -> T): T =
+        try {
+            block()
+        } catch (e: VaultFolderException) {
+            throw when (e.kind) {
+                VaultFolderException.Kind.ALREADY_EXISTS -> FolderException.AlreadyExists()
+                VaultFolderException.Kind.NOT_FOUND -> FolderException.NotFound()
+                VaultFolderException.Kind.TOO_LARGE -> FolderException.TooLarge()
+            }
+        } catch (e: Exception) {
+            throw FolderException.Failed(e.message ?: e.javaClass.simpleName)
+        }
+}
 
 internal actual suspend fun nativePasswordStrength(password: ByteArray): StrengthEstimate = background {
     consuming(password) {

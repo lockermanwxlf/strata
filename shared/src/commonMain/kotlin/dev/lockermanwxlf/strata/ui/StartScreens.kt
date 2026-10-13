@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -55,7 +56,8 @@ fun CreateScreen(c: VaultController, folder: String) {
     val scope = rememberCoroutineScope()
 
     ScreenFrame("New vault", onBack = { c.back() }) {
-        Text("Folder: $folder", style = MaterialTheme.typography.bodySmall)
+        val label by produceState(folder, folder) { value = c.describe(folder) }
+        Text("Folder: $label", style = MaterialTheme.typography.bodySmall)
         Text(
             "Choose the password you'll unlock the vault with. It can't be recovered, but the recovery " +
                 "words shown next can always open the vault.",
@@ -147,7 +149,7 @@ fun UnlockScreen(c: VaultController) {
     var useWords by remember { mutableStateOf(false) }
 
     ScreenFrame("Unlock") {
-        c.folder?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        c.folderLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         if (!useWords) {
             PasswordField(password, "Password")
             Button(

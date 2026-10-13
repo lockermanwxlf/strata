@@ -439,7 +439,7 @@ Implementation notes:
   - Revealed values hide after 30 seconds.
   - Recovery words are wiped when their screen is left or the app locks.
 - **Desktop:** pick the vault folder with a folder chooser. The last folder is remembered in `ui.properties` next to the local state.
-- **Android:** the vault lives in the app-specific folder until Storage Access Framework support. Rotation doesn't recreate the activity, so it doesn't lock. The recovery-words screen is `FLAG_SECURE` even in debug builds.
+- **Android:** the vault lived in the app-specific folder until Phase 11 added Storage Access Framework folders. Rotation doesn't recreate the activity, so it doesn't lock. The recovery-words screen is `FLAG_SECURE` even in debug builds.
 - **Core additions:** `generate_password` (CSPRNG, rejection sampling) and `default_state_dir`.
 - **Tests:**
   - `ControllerTest` drives the controller's flows against the real library.
@@ -494,7 +494,38 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 
 - `RemoteStore` as a Kotlin foreign trait over the Storage Access Framework (SAF), so the user can pick a synced folder.
 - Checks for no-overwrite rename on SAF providers, falling back to create-exclusive by name. Behavior varies by provider, so a manual test matrix is needed.
-- Background sync with WorkManager, while the vault is unlocked or using the local slot.
+- ~~Background sync with WorkManager~~: dropped, see below.
+
+**Status: done (2026-10-13), apart from the provider test matrix, which needs real providers.**
+
+- **Core:** `ForeignFolder` (UniFFI foreign trait) and `ForeignStore`, its `RemoteStore` adapter (`sync/foreign_store.rs`). The adapter validates every path before calling out, hides temporary and malformed names, drops duplicate names, and enforces the read limit again on what comes back. FFI: `create_vault_in_folder` and `Vault::open_folder`. Path validation moved to `store::split_path`, shared with `FsStore`.
+- **Kotlin:** common `VaultFolder`; `AppHost.platformFolder` and `describeFolder`; `isVault` is now suspending, and `start()` shows a blank screen while it checks.
+- **Android (`SafFolder`):**
+  - The system folder picker, with a persisted grant. Setting the vault folder releases the grants to every other folder.
+  - `create` writes a hidden temporary file and renames it into place where the provider can; otherwise it creates the final name directly.
+  - Either way it then checks that the file got exactly the name and is the only one with it, and otherwise removes its file and reports the name taken (spec §5). This is because the device's storage provider picks a new name (`x (1).evt`) on a collision and cloud providers may keep duplicates.
+  - Partial listings from providers that are still loading (`EXTRA_LOADING`) are retried, not trusted.
+  - Vaults in the old app folder (a plain path) still open.
+- **No WorkManager.** Background sync can't do anything useful:
+  - Reading other devices' changes needs the vault key.
+  - Changes waiting to upload sit in the encrypted local state.
+  - The vault locks 30 seconds after the app leaves the screen, and a local slot needs a biometric prompt, which background work can't show.
+  - Instead, the app syncs once as it goes to the background, which sends anything still waiting before the lock.
+- **Tests:**
+  - Adapter tests: bad paths never reach the folder, odd and duplicate names are hidden, and the read limit holds.
+  - An FFI test creates a vault through a foreign folder and opens the same files as a plain directory, in both directions.
+- **Provider matrix** (manual):
+
+  | Provider | Rename | Collision behavior | Result |
+  |---|---|---|---|
+  | Device storage (`com.android.externalstorage.documents`) | yes | picks a new name | passed on the emulator, 2026-10-13 |
+  | Google Drive, Nextcloud, Syncthing-Fork folders, SD card | ? | ? | not yet tested (needs a real device and accounts) |
+
+- **Emulator run (device storage, `Documents/StrataTest`):**
+  - Picked the folder, created a vault and added an entry. Every file had exactly its own name, with no temporary leftovers and no `(1)` copies.
+  - Copied the folder to Windows and opened it as a plain directory: same entry, no alarm. Wrote a field there, copied the new event back, synced on the phone: the field showed up.
+  - Planted a file under the name of the phone's next event, then saved an edit. The planted file stayed untouched, no second copy appeared, and the phone raised the fork alarm (spec §5).
+  - That run showed the alarm only as a passing message, because a save refused by an alarm didn't refresh the status. Fixed: the controller now refreshes, so the alarm screen comes up at once.
 
 ### Phase 12: KDBX import/export (M)
 

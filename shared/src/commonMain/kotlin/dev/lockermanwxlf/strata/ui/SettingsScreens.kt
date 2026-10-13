@@ -36,7 +36,7 @@ fun SettingsScreen(c: VaultController) {
     var choosingPin by remember { mutableStateOf(false) }
     val status = c.status
     ScreenFrame("Settings", onBack = { c.back() }) {
-        c.folder?.let { Hint("Vault folder: $it") }
+        c.folderLabel?.let { Hint("Vault folder: $it") }
         c.lastSync?.let { s ->
             Hint(
                 "Last sync: ${s.applied} change${if (s.applied == 1) "" else "s"} received, ${s.uploaded} sent" +

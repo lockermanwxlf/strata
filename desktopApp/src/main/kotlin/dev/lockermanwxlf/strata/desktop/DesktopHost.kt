@@ -58,7 +58,7 @@ class DesktopHost : AppHost {
         if (chooser.showDialog(null, "Choose") == JFileChooser.APPROVE_OPTION) chooser.selectedFile.path else null
     }
 
-    override fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
+    override suspend fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
 
     /** This computer's device unlock, if any; checked once, on first use. */
     override val deviceProtector: DeviceProtector? by lazy { StrataCore.desktopProtector() }

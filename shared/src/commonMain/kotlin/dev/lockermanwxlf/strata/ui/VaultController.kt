@@ -23,6 +23,8 @@ import kotlinx.coroutines.launch
 
 /** Where the app is. The controller keeps a stack of these; the last one is shown. */
 sealed interface Screen {
+    /** Blank while [VaultController.start] looks for the vault used last time. */
+    data object Starting : Screen
     data object Welcome : Screen
     data class Create(val folder: String) : Screen
 
@@ -61,7 +63,7 @@ class VaultController(
     /** Clear a copied secret from the clipboard after this long. */
     val clipboardTimeout: Duration = 30.seconds,
 ) {
-    var stack by mutableStateOf<List<Screen>>(listOf(Screen.Welcome))
+    var stack by mutableStateOf<List<Screen>>(listOf(Screen.Starting))
         private set
     val screen: Screen get() = stack.last()
 
@@ -72,6 +74,12 @@ class VaultController(
     var message by mutableStateOf<String?>(null)
     var folder by mutableStateOf<String?>(null)
         private set
+
+    /** [folder] as the user should see it. */
+    var folderLabel by mutableStateOf<String?>(null)
+        private set
+
+    suspend fun describe(folder: String): String = host.describeFolder(folder)
     var entries by mutableStateOf<List<EntrySummary>>(emptyList())
         private set
     var status by mutableStateOf<VaultStatus?>(null)
@@ -130,7 +138,7 @@ class VaultController(
     // ---- Opening and locking ---------------------------------------------------------
 
     /** Picks up the vault used last time, if it's still there. */
-    fun start() {
+    fun start() = scope.launch {
         val last = host.lastVaultFolder
         if (last != null && host.isVault(last)) openHandle(last) else reset(Screen.Welcome)
     }
@@ -155,11 +163,14 @@ class VaultController(
 
     private fun openHandle(chosen: String) {
         vault?.close()
-        vault = StrataCore.openVault(chosen, host.stateDir, host.defaultDeviceName)
+        vault = host.platformFolder(chosen)
+            ?.let { StrataCore.openVault(it, host.stateDir, host.defaultDeviceName) }
+            ?: StrataCore.openVault(chosen, host.stateDir, host.defaultDeviceName)
         folder = chosen
         host.lastVaultFolder = chosen
         reset(Screen.Unlock)
         scope.launch { refreshDeviceUnlock() }
+        scope.launch { folderLabel = describe(chosen) }
     }
 
     private suspend fun refreshDeviceUnlock() {
@@ -195,10 +206,13 @@ class VaultController(
 
     /** Creates the vault and shows its recovery words. [password] is wiped. */
     fun create(folder: String, password: ByteArray) = perform {
-        val created = StrataCore.createVault(folder, host.stateDir, password, host.defaultDeviceName)
+        val created = host.platformFolder(folder)
+            ?.let { StrataCore.createVault(it, host.stateDir, password, host.defaultDeviceName) }
+            ?: StrataCore.createVault(folder, host.stateDir, password, host.defaultDeviceName)
         vault?.close()
         vault = created.vault
         this.folder = folder
+        folderLabel = describe(folder)
         host.lastVaultFolder = folder
         alarmAcknowledged = false
         refresh()
@@ -245,6 +259,7 @@ class VaultController(
         vault?.close()
         vault = null
         folder = null
+        folderLabel = null
         host.lastVaultFolder = null
         entries = emptyList()
         status = null
@@ -265,6 +280,8 @@ class VaultController(
 
     fun backgrounded() {
         if (!unlocked) return
+        // Sends any change still waiting to reach the folder before the vault locks.
+        syncQuietly()
         backgroundJob?.cancel()
         backgroundJob = scope.launch {
             delay(backgroundTimeout)
@@ -414,7 +431,8 @@ class VaultController(
             block()
         } catch (e: StrataException) {
             if (e.reason != StrataException.Reason.CANCELLED) message = e.message
-            if (e.reason == StrataException.Reason.KEY_ROTATED) refresh()
+            // A change refused by an alarm brings up the alarm screen, not just a message.
+            if (e.reason == StrataException.Reason.KEY_ROTATED || e.reason == StrataException.Reason.ALARM) refresh()
         } finally {
             busy = false
         }

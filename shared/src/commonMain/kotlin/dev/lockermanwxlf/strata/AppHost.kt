@@ -16,12 +16,21 @@ interface AppHost {
 
     /**
      * Asks where the vault is, or where a new one goes; `null` if the user cancelled.
-     * Android has a fixed app folder for now and returns it without asking.
+     * The answer is a path on desktop and a folder URI on Android.
      */
     suspend fun chooseVaultFolder(forNewVault: Boolean): String?
 
     /** Whether [folder] holds a vault (its `strata-vault` file). */
-    fun isVault(folder: String): Boolean
+    suspend fun isVault(folder: String): Boolean
+
+    /**
+     * How the core reaches [folder]: `null` for a filesystem path, otherwise the
+     * platform's own access to it (on Android, the Storage Access Framework).
+     */
+    fun platformFolder(folder: String): VaultFolder? = null
+
+    /** [folder] as the user should see it. */
+    suspend fun describeFolder(folder: String): String = folder
 
     /** Biometric or Windows Hello unlock on this device, or `null` if there is none. */
     val deviceProtector: DeviceProtector?

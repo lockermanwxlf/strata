@@ -35,7 +35,7 @@ internal class FakeHost(root: Path) : AppHost {
 
     override suspend fun chooseVaultFolder(forNewVault: Boolean) = nextFolder
 
-    override fun isVault(folder: String) = File(folder, "strata-vault").isFile
+    override suspend fun isVault(folder: String) = File(folder, "strata-vault").isFile
 
     override val deviceProtector: DeviceProtector? = null
 
@@ -104,7 +104,7 @@ class ControllerTest {
         assertEquals(vaultDir, host.lastVaultFolder)
 
         val next = controller()
-        next.start()
+        next.start().join()
         assertEquals(Screen.Unlock, next.screen)
         next.unlock(pw("wrong")).join()
         assertEquals(Screen.Unlock, next.screen)
@@ -192,6 +192,8 @@ class ControllerTest {
     @Test
     fun openingAFolderWithoutAVaultSaysSo() = runBlocking<Unit> {
         val c = controller()
+        c.start().join()
+        assertEquals(Screen.Welcome, c.screen)
         host.nextFolder = root.resolve("empty").also { Files.createDirectories(it) }.pathString
         c.chooseExistingVault().join()
         assertEquals(Screen.Welcome, c.screen)

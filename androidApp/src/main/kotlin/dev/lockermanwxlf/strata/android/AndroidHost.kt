@@ -1,22 +1,35 @@
 package dev.lockermanwxlf.strata.android
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.WindowManager
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import dev.lockermanwxlf.strata.AppHost
 import dev.lockermanwxlf.strata.DeviceProtector
 import dev.lockermanwxlf.strata.deviceProtector
 import dev.lockermanwxlf.strata.SecretClipboard
+import dev.lockermanwxlf.strata.StrataException
 import java.io.File
 import java.nio.ByteBuffer
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-class AndroidHost(private val activity: Activity) : AppHost {
+private const val READ_WRITE = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+/** The authority of the device's own storage in the Storage Access Framework. */
+private const val EXTERNAL_STORAGE = "com.android.externalstorage.documents"
+
+class AndroidHost(private val activity: ComponentActivity) : AppHost {
     override val stateDir: String = File(activity.filesDir, "state").path
 
     override val defaultDeviceName: String =
@@ -24,23 +37,76 @@ class AndroidHost(private val activity: Activity) : AppHost {
 
     private val prefs = activity.getSharedPreferences("ui", Context.MODE_PRIVATE)
 
-    override var lastVaultFolder: String?
-        get() = prefs.getString("lastVaultFolder", null)
-        set(value) = prefs.edit().putString("lastVaultFolder", value).apply()
+    private val resolver = activity.contentResolver
 
     /**
-     * The app's own folder until folders from the Storage Access Framework are
-     * supported. App-specific external storage, so the files can be copied off the
-     * device; they're encrypted either way.
+     * Also gives up access to every other folder picked earlier: the app keeps one
+     * vault, and Android limits how many folders an app may hold on to.
      */
-    private val vaultFolder: File = File(activity.getExternalFilesDir(null) ?: activity.filesDir, "vault")
+    override var lastVaultFolder: String?
+        get() = prefs.getString("lastVaultFolder", null)
+        set(value) {
+            prefs.edit().putString("lastVaultFolder", value).apply()
+            resolver.persistedUriPermissions
+                .filter { it.uri.toString() != value }
+                .forEach { runCatching { resolver.releasePersistableUriPermission(it.uri, READ_WRITE) } }
+        }
 
-    override suspend fun chooseVaultFolder(forNewVault: Boolean): String {
-        vaultFolder.mkdirs()
-        return vaultFolder.path
+    private var picked: CompletableDeferred<Uri?>? = null
+
+    // Registered while the activity is created, as the Activity Result API requires.
+    private val folderPicker = activity.registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) {
+        picked?.complete(it)
     }
 
-    override fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
+    /**
+     * The system folder picker (Storage Access Framework). A folder on the device that
+     * another app syncs (Syncthing and the like), or a cloud provider's folder.
+     */
+    override suspend fun chooseVaultFolder(forNewVault: Boolean): String? {
+        val result = CompletableDeferred<Uri?>()
+        picked?.cancel()
+        picked = result
+        folderPicker.launch(null)
+        val uri = result.await() ?: return null
+        try {
+            resolver.takePersistableUriPermission(uri, READ_WRITE)
+        } catch (e: SecurityException) {
+            throw StrataException(StrataException.Reason.IO, "Strata can't keep access to that folder: ${e.message}")
+        }
+        return uri.toString()
+    }
+
+    override suspend fun isVault(folder: String): Boolean = withContext(Dispatchers.IO) {
+        platformFolder(folder)?.holdsVault() ?: File(folder, "strata-vault").isFile
+    }
+
+    /**
+     * Folders from the picker are content URIs. A plain path is a vault an earlier
+     * version kept in the app's own storage.
+     */
+    override fun platformFolder(folder: String): SafFolder? =
+        if (folder.startsWith("content://")) SafFolder(resolver, Uri.parse(folder)) else null
+
+    private val labels = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    override suspend fun describeFolder(folder: String): String = withContext(Dispatchers.IO) {
+        if (!folder.startsWith("content://")) return@withContext folder
+        labels.getOrPut(folder) {
+            val tree = Uri.parse(folder)
+            val id = DocumentsContract.getTreeDocumentId(tree)
+            if (tree.authority == EXTERNAL_STORAGE) {
+                // The device's storage names documents by path: "primary:Documents/Vault".
+                id.substringAfter(':').ifEmpty { "Internal storage" }
+            } else {
+                runCatching {
+                    val doc = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+                    resolver.query(doc, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)
+                        ?.use { if (it.moveToFirst()) it.getString(0) else null }
+                }.getOrNull() ?: id
+            }
+        }
+    }
 
     /** Biometrics or the screen lock, through Android Keystore; none without a screen lock. */
     override val deviceProtector: DeviceProtector? = KeystoreProtector(activity)
