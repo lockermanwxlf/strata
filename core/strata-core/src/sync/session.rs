@@ -1038,8 +1038,10 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     }
 }
 
+mod local_slots;
 mod rotate;
 
+pub use local_slots::LocalSlot;
 pub use rotate::{PurgeReport, RecoveryChoice, Rotated};
 
 #[cfg(test)]

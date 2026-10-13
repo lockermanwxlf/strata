@@ -1,6 +1,7 @@
 package dev.lockermanwxlf.strata.desktop
 
 import dev.lockermanwxlf.strata.AppHost
+import dev.lockermanwxlf.strata.DeviceProtector
 import dev.lockermanwxlf.strata.SecretClipboard
 import dev.lockermanwxlf.strata.StrataCore
 import java.awt.Toolkit
@@ -21,8 +22,11 @@ import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
 
 class DesktopHost : AppHost {
+    /** `STRATA_STATE_DIR` overrides it, for development and testing. */
     override val stateDir: String =
-        StrataCore.defaultStateDir() ?: File(System.getProperty("user.home"), ".strata").path
+        System.getenv("STRATA_STATE_DIR")
+            ?: StrataCore.defaultStateDir()
+            ?: File(System.getProperty("user.home"), ".strata").path
 
     override val defaultDeviceName: String =
         System.getenv("COMPUTERNAME")
@@ -55,6 +59,9 @@ class DesktopHost : AppHost {
     }
 
     override fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
+
+    /** Windows Hello when it's set up; checked once, on first use. */
+    override val deviceProtector: DeviceProtector? by lazy { StrataCore.windowsHello() }
 
     override val clipboard: SecretClipboard = AwtClipboard()
 

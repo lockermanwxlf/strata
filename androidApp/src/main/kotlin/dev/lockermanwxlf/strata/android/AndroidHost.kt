@@ -10,6 +10,8 @@ import android.os.PersistableBundle
 import android.provider.Settings
 import android.view.WindowManager
 import dev.lockermanwxlf.strata.AppHost
+import dev.lockermanwxlf.strata.DeviceProtector
+import dev.lockermanwxlf.strata.deviceProtector
 import dev.lockermanwxlf.strata.SecretClipboard
 import java.io.File
 import java.nio.ByteBuffer
@@ -39,6 +41,11 @@ class AndroidHost(private val activity: Activity) : AppHost {
     }
 
     override fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
+
+    /** Biometrics or the screen lock, through Android Keystore; none without a screen lock. */
+    override val deviceProtector: DeviceProtector? = KeystoreProtector(activity)
+        .takeIf { it.available }
+        ?.let { deviceProtector(DeviceProtector.ANDROID_KEYSTORE, "fingerprint or screen lock", it) }
 
     override val clipboard: SecretClipboard = AndroidClipboard(activity)
 

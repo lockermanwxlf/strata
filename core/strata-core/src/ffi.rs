@@ -16,16 +16,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use zeroize::Zeroizing;
 
-use crate::crypto::{SecretBytes, generate};
+use crate::crypto::{SecretBytes, SecretKey, generate, random_id};
 use crate::error::{AlarmKind, CoreError};
 use crate::format::Id;
 use crate::format::body::Op;
 use crate::keys::create::create_vault as create_vault_files;
 use crate::keys::strength;
-use crate::keys::unlock::{Credential, unlock};
+use crate::keys::unlock::{Credential, local_slots, unlock};
 use crate::local::{FsLocalStore, LocalStore};
 use crate::merge::edit::{Edit, new_entry_id as fresh_entry_id};
 use crate::merge::view::{EntryView, Field};
+use crate::policy::check_platform_policy;
+use crate::protector::{PlatformProtector, ProtectorError};
 use crate::sync::session::{GC_GRACE_MS, PurgeReport, Rotated, SessionOf, SyncReport};
 use crate::sync::{FsStore, RemoteStore};
 
@@ -63,6 +65,28 @@ pub enum VaultError {
     /// The field holds concurrent values; use `reveal_conflict`.
     #[error("the field has conflicting values")]
     FieldConflict,
+    /// The user cancelled the platform prompt.
+    #[error("cancelled")]
+    Cancelled,
+    /// The platform key behind a local unlock is gone (for example, biometric
+    /// enrollment changed). Unlock with the password; the slot is then removed.
+    #[error("this device's unlock key is no longer valid; unlock with the password")]
+    KeyInvalidated,
+    #[error("device unlock unavailable: {detail}")]
+    ProtectorUnavailable { detail: String },
+}
+
+impl From<ProtectorError> for VaultError {
+    fn from(e: ProtectorError) -> Self {
+        match e {
+            ProtectorError::Cancelled => VaultError::Cancelled,
+            ProtectorError::KeyInvalidated => VaultError::KeyInvalidated,
+            ProtectorError::Unavailable { reason } => {
+                VaultError::ProtectorUnavailable { detail: reason }
+            }
+            ProtectorError::Platform { detail } => VaultError::ProtectorUnavailable { detail },
+        }
+    }
 }
 
 impl From<CoreError> for VaultError {
@@ -307,6 +331,13 @@ pub struct Vault {
     /// Mirrors whether `session` is set, readable without waiting for a call that
     /// holds the session (a sync, or Argon2 in a password change).
     unlocked: AtomicBool,
+    /// Slot secrets from local slots unlocked or enrolled while open, kept to re-wrap
+    /// the slots after the key changes without another prompt (spec §7.2). As
+    /// sensitive as the epoch keys the session holds anyway, and dropped on lock.
+    local_secrets: Mutex<Vec<(Id, SecretKey)>>,
+    /// Protectors whose key turned out to be invalidated: their slots are removed at
+    /// the next unlock (spec §11).
+    invalidated: Mutex<Vec<u8>>,
 }
 
 /// Creates a vault in the empty directory `vault_dir`, with this device's local state
@@ -372,6 +403,8 @@ impl Vault {
             device_name,
             session: Mutex::new(None),
             unlocked: AtomicBool::new(false),
+            local_secrets: Mutex::new(Vec::new()),
+            invalidated: Mutex::new(Vec::new()),
         }))
     }
 
@@ -405,6 +438,10 @@ impl Vault {
             &self.device_name,
         )?;
         let summary = sync_and_maintain(&mut session)?;
+        for protector_id in std::mem::take(&mut *lock(&self.invalidated)) {
+            session.remove_local_slots(protector_id)?;
+        }
+        self.refresh_local_slots(&mut session)?;
         *self.slot() = Some(session);
         self.unlocked.store(true, Ordering::SeqCst);
         Ok(summary)
@@ -413,6 +450,23 @@ impl Vault {
     fn rejoin_with(&self, credential: Credential<'_>) -> Result<()> {
         self.with_session(|s| Ok(s.rejoin(credential)?))
     }
+
+    /// After anything that may have changed the key: re-wraps the local slots whose
+    /// secret is held, and drops stale ones.
+    fn refresh_local_slots(&self, session: &mut FfiSession) -> Result<()> {
+        Ok(session.refresh_local_slots(&lock(&self.local_secrets))?)
+    }
+
+    fn remember_secret(&self, slot_id: Id, secret: SecretKey) {
+        let mut secrets = lock(&self.local_secrets);
+        secrets.retain(|(id, _)| *id != slot_id);
+        secrets.push((slot_id, secret));
+    }
+}
+
+/// Locks a plain mutex, ignoring poisoning: these hold no invariants a panic could break.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[uniffi::export]
@@ -445,6 +499,7 @@ impl Vault {
     pub fn lock(&self) {
         self.unlocked.store(false, Ordering::SeqCst);
         *self.slot() = None;
+        lock(&self.local_secrets).clear();
     }
 
     /// Uploads pending changes and takes in everyone else's. Also snapshots when
@@ -652,20 +707,32 @@ impl Vault {
     /// with the new password once.
     pub fn change_password(&self, new_password: Vec<u8>) -> Result<RotationSummary> {
         let new_password = Zeroizing::new(new_password);
-        self.with_session(|s| Ok((&s.change_password(&new_password)?).into()))
+        self.with_session(|s| {
+            let rotated = s.change_password(&new_password)?;
+            self.refresh_local_slots(s)?;
+            Ok((&rotated).into())
+        })
     }
 
     /// Returns the new recovery words; the old ones stop working.
     pub fn replace_recovery_key(&self, password: Vec<u8>) -> Result<Vec<u8>> {
         let password = Zeroizing::new(password);
-        self.with_session(|s| Ok(s.replace_recovery_key(&password)?.expose().to_vec()))
+        self.with_session(|s| {
+            let words = s.replace_recovery_key(&password)?;
+            self.refresh_local_slots(s)?;
+            Ok(words.expose().to_vec())
+        })
     }
 
     /// Retires the device and rotates the key so it can't read anything new.
     pub fn revoke_device(&self, client_id: String, password: Vec<u8>) -> Result<RotationSummary> {
         let password = Zeroizing::new(password);
         let id = parse_id(&client_id)?;
-        self.with_session(|s| Ok((&s.revoke_device(id, &password)?).into()))
+        self.with_session(|s| {
+            let rotated = s.revoke_device(id, &password)?;
+            self.refresh_local_slots(s)?;
+            Ok((&rotated).into())
+        })
     }
 
     /// After `lost_rotation`: switches to the winning device's key with its password.
@@ -683,12 +750,103 @@ impl Vault {
     pub fn purge(&self, entry_id: String, password: Vec<u8>) -> Result<PurgeSummary> {
         let password = Zeroizing::new(password);
         let id = parse_id(&entry_id)?;
-        self.with_session(|s| Ok((&s.purge(id, &password)?).into()))
+        self.with_session(|s| {
+            let purged = s.purge(id, &password)?;
+            self.refresh_local_slots(s)?;
+            Ok((&purged).into())
+        })
     }
 
     /// Reverts every change flagged for review; returns how many edits that took.
     pub fn revert_flagged(&self) -> Result<u32> {
         self.with_session(|s| Ok(count(s.revert_flagged()?)))
+    }
+}
+
+/// Unlocking with a platform protector (spec §11). These await the protector, which
+/// may show a prompt, without holding the session.
+#[uniffi::export]
+impl Vault {
+    /// The protectors with a local slot that can unlock this device (`protector_id`s,
+    /// spec §11). Works while locked, for the unlock screen.
+    pub fn local_unlocks(&self) -> Result<Vec<u8>> {
+        let mut ids: Vec<u8> = local_slots(&*self.store, &*self.local)?
+            .into_iter()
+            .map(|s| s.protector_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// Unlocks with `protector`'s local slot, then syncs. If the platform key was
+    /// invalidated, fails with `KeyInvalidated`; the slot goes at the next unlock.
+    pub async fn unlock_local(
+        &self,
+        protector: Arc<dyn PlatformProtector>,
+        protector_id: u8,
+    ) -> Result<SyncSummary> {
+        let slot = local_slots(&*self.store, &*self.local)?
+            .into_iter()
+            .filter(|s| s.protector_id == protector_id)
+            .max_by_key(|s| s.epoch)
+            .ok_or_else(|| not_found("device unlock"))?;
+        let unwrapped = match protector.unwrap(hex::encode(slot.slot_id), slot.blob).await {
+            Ok(bytes) => Zeroizing::new(bytes),
+            Err(ProtectorError::KeyInvalidated) => return Err(self.invalidate(protector_id)),
+            Err(e) => return Err(e.into()),
+        };
+        let Ok(secret) = SecretKey::from_slice(&unwrapped) else {
+            return Err(self.invalidate(protector_id));
+        };
+        match self.unlock_with(Credential::LocalSlot {
+            slot_id: slot.slot_id,
+            secret: &secret,
+        }) {
+            Ok(summary) => {
+                self.remember_secret(slot.slot_id, secret);
+                Ok(summary)
+            }
+            // The protector returned something that opens nothing: as good as gone.
+            Err(VaultError::WrongCredential) => Err(self.invalidate(protector_id)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Adds (or replaces) this device's local slot for `protector`. Needs the vault
+    /// unlocked. The core checks the protector against the slot policy (spec §6.2).
+    pub async fn enable_local_unlock(
+        &self,
+        protector: Arc<dyn PlatformProtector>,
+        protector_id: u8,
+    ) -> Result<()> {
+        let caps = protector.capabilities();
+        check_platform_policy(&caps).map_err(CoreError::from)?;
+        if self.is_locked() {
+            return Err(VaultError::Locked);
+        }
+        let slot_id = random_id()?;
+        let secret = SecretKey::generate()?;
+        let blob = protector
+            .wrap(hex::encode(slot_id), secret.expose().to_vec())
+            .await?;
+        self.with_session(|s| {
+            Ok(s.add_local_slot(slot_id, protector_id, blob, &secret, &caps)?)
+        })?;
+        self.remember_secret(slot_id, secret);
+        Ok(())
+    }
+
+    /// Removes this device's local slots for `protector_id`.
+    pub fn disable_local_unlock(&self, protector_id: u8) -> Result<()> {
+        self.with_session(|s| Ok(s.remove_local_slots(protector_id)?))
+    }
+}
+
+impl Vault {
+    fn invalidate(&self, protector_id: u8) -> VaultError {
+        lock(&self.invalidated).push(protector_id);
+        VaultError::KeyInvalidated
     }
 }
 

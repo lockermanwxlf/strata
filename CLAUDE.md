@@ -27,8 +27,9 @@ Keep the FFI API coarse-grained, e.g. "decrypted list view", "apply edit", "sync
 `PlatformProtector` (in `protector.rs`) is a UniFFI foreign trait: `capabilities`, async `wrap`/`unwrap`, `delete`.
 
 - Protectors only ever see a random per-slot **slot secret**. The core derives the KEK from it and wraps the vault key itself, so the vault key never crosses FFI. Zero buffers on both sides immediately.
-- **Android (Kotlin):** Keystore AES-GCM key, `setIsStrongBoxBacked(true)` with TEE fallback, `setUserAuthenticationRequired(true)`, unwrap via `BiometricPrompt` + `CryptoObject`. Verify `KeyInfo.securityLevel` before reporting `hardwareBacked`.
-- **Windows (Rust, `windows` crate):** Hello `KeyCredentialManager` signs a fixed per-slot challenge; the hash of that deterministic signature is the KEK. Pass the HWND from Kotlin so the prompt isn't hidden.
+- **Android (Kotlin, `androidApp/.../KeystoreProtector.kt`):** one Keystore AES-GCM key for the app, `setIsStrongBoxBacked(true)` with TEE fallback, `setUserAuthenticationRequired(true)`, wrap and unwrap via the platform `BiometricPrompt` + `CryptoObject`, slot ID as associated data. Verify `KeyInfo.securityLevel` before reporting `hardwareBacked`.
+- **Shared keys:** a protector may use one hardware key for every slot, binding the slot ID into each wrap; then `delete` is a no-op. While unlocked, the core keeps the slot secret so it can re-wrap local slots after a key change without another prompt (spec §11).
+- **Windows (Rust, `windows` crate, `protector/windows_hello.rs`):** one Hello `KeyCredentialManager` credential for the app signs a fixed per-slot challenge; a hash of that deterministic (RSA PKCS#1 v1.5) signature wraps the slot secret. There is no window-parented API for Hello keys, so while the prompt opens the protector brings the "Credential Dialog Xaml Host" window to the front.
 - **macOS (Rust, `security-framework`):** Secure Enclave P-256 key with `biometryCurrentSet`/`userPresence`, `SecKeyCreateEncryptedData` (ECIES). Requires a signed app with entitlements.
 - **Linux (Rust):** TPM 2.0 (`tss-esapi`) seal with PIN auth, which counts as rate-limited. Otherwise Secret Service (`keyring`), reported as **not** rate-limited.
 - **Implementations stay thin** (<200 lines): wrap, unwrap, delete. No policy or format logic.

@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.lockermanwxlf.strata.AppHost
+import dev.lockermanwxlf.strata.DeviceProtector
 import dev.lockermanwxlf.strata.EntryEdit
 import dev.lockermanwxlf.strata.EntrySummary
 import dev.lockermanwxlf.strata.StrataCore
@@ -79,6 +80,13 @@ class VaultController(
         private set
     var query by mutableStateOf("")
 
+    /** This device's biometric or Windows Hello unlock, if the platform has one. */
+    val deviceProtector: DeviceProtector? get() = host.deviceProtector
+
+    /** [deviceProtector] can unlock this vault on this device. */
+    var deviceUnlockEnabled by mutableStateOf(false)
+        private set
+
     /** The user has seen the alarm screen and chose to keep reading. */
     var alarmAcknowledged by mutableStateOf(false)
         private set
@@ -151,6 +159,35 @@ class VaultController(
         folder = chosen
         host.lastVaultFolder = chosen
         reset(Screen.Unlock)
+        scope.launch { refreshDeviceUnlock() }
+    }
+
+    private suspend fun refreshDeviceUnlock() {
+        val p = deviceProtector
+        deviceUnlockEnabled = p != null && attempt { vault?.localUnlocks() }.orEmpty().contains(p.id)
+    }
+
+    /** Unlocks with [deviceProtector]. A dismissed prompt just returns to the unlock screen. */
+    fun unlockWithDevice() = perform {
+        val v = vault ?: return@perform
+        val p = deviceProtector ?: return@perform
+        try {
+            afterSync(v.unlockLocal(p))
+        } catch (e: StrataException) {
+            if (e.reason == StrataException.Reason.KEY_INVALIDATED) deviceUnlockEnabled = false
+            throw e
+        }
+        alarmAcknowledged = false
+        lastInput = TimeSource.Monotonic.markNow()
+        reset(Screen.Entries)
+    }
+
+    /** Turns device unlock on (one prompt) or off for this vault on this device. */
+    fun setDeviceUnlock(enabled: Boolean) = perform {
+        val v = vault ?: return@perform
+        val p = deviceProtector ?: return@perform
+        if (enabled) v.enableLocalUnlock(p) else v.disableLocalUnlock(p.id)
+        refreshDeviceUnlock()
     }
 
     /** Creates the vault and shows its recovery words. [password] is wiped. */
@@ -264,6 +301,8 @@ class VaultController(
         val v = vault ?: return
         status = v.status()
         entries = if (status?.locked == false) v.entries() else emptyList()
+        // An unlock or a key change can drop or re-wrap the local slot.
+        refreshDeviceUnlock()
     }
 
     suspend fun entry(id: String) = vault?.entry(id)
@@ -371,7 +410,7 @@ class VaultController(
         try {
             block()
         } catch (e: StrataException) {
-            message = e.message
+            if (e.reason != StrataException.Reason.CANCELLED) message = e.message
             if (e.reason == StrataException.Reason.KEY_ROTATED) refresh()
         } finally {
             busy = false

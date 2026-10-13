@@ -202,9 +202,8 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             epoch: next,
             key_id: keys.key_id,
         };
-        // Local slots wrap the old key and open only the old epoch now. Platform
-        // protectors re-enroll after the rotation (spec §7.2, step 4).
-        self.state.local_slots.clear();
+        // Local slots still wrap the old key, so they open only the old epoch, below
+        // the pin: stale. `refresh_local_slots` re-wraps or drops them (spec §7.2, step 5).
         self.save()?;
 
         for (path, epoch, _) in &old_slots {
@@ -335,7 +334,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             epoch: self.keyring.current(),
             key_id: current.key_id,
         };
-        self.state.local_slots.clear();
+        self.clear_local_slots();
         // Rollback protection carries over for the shared history. Nothing written
         // under the losing key is readable with the new one.
         self.state.record.high_water = shared

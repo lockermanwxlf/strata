@@ -174,6 +174,7 @@ The maximums stop a malicious slot from exhausting memory or CPU. The minimums e
 **Policy.** The core MUST call `check_slot_policy` (`policy.rs`) before it creates any slot. Kind 4 MUST NOT appear in `slots/`; readers reject it there.
 
 - **PINs** are the only Weak protector. They are entered into a platform protector (a TPM PIN, or the Android device credential), so they appear only in kind-4 local slots, and the policy requires that keystore to be hardware-backed and rate-limited.
+- **Platform protectors** are judged by what unlocks them. One that prompts the user (biometrics, Windows Hello, the Android screen lock) may accept a PIN, so it counts as Weak. One that the OS session unlocks without a prompt (Secret Service) is as strong as the login password, so it counts as Strong.
 - **Passwords of any strength** count as Strong and may be synced. This is the user's choice. Before the core creates or changes a password slot, it gives the UI a strength estimate (a zxcvbn-style guess count). Below about 10^10 estimated guesses, the UI MUST warn that anyone holding the vault files can guess the password offline, and MUST require an explicit "use anyway". The exact threshold and wording are UI guidance, not part of the format.
 
 **Slot file.** `P` below is `params_len`.
@@ -610,6 +611,10 @@ The layout is implementation-defined. Local state is never shared, so it isn't p
 Any decrypted cache of vault contents MUST live only inside this record.
 
 A platform key that has been invalidated (for example, because biometric enrollment changed) makes `unwrap` fail with `KeyInvalidated`. The core treats that as "slot gone": delete the local slot, fall back to a synced protector, and offer to re-enroll.
+
+**After a key change.** A local slot wraps the epoch key of its epoch, so after a rotation it opens only that epoch, and once the pin has moved past it, nothing (§6.3 step 4). While the device is unlocked, the core keeps the slot secret `S` it got from the protector when unlocking or enrolling. When the key changes (a rotation on this device, or a password unlock after one elsewhere), it re-wraps the new epoch key under the same `S`, with no second prompt. A stale slot whose `S` it doesn't hold is dropped, and the UI offers to turn device unlock on again.
+
+**One platform key, many slots.** A protector may keep a single hardware key for the app and bind the slot ID into each wrap, as associated data or inside a signed challenge. Dropping a slot then leaves nothing behind in the keystore.
 
 ## 12. Versioning
 

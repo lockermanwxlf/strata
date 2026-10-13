@@ -227,3 +227,189 @@ fn bad_input_is_rejected_cleanly() {
             .warn
     );
 }
+
+// ---- Local slots with a fake platform protector (spec §11) ----------------------
+
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
+
+use crate::protector::{ProtectorCaps, ProtectorError};
+
+/// Runs a future that never waits: the fake protector answers at once.
+fn ready<F: std::future::Future>(f: F) -> F::Output {
+    let mut f = pin!(f);
+    match f.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(v) => v,
+        Poll::Pending => panic!("the fake protector never waits"),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Normal,
+    Cancel,
+    Invalidated,
+}
+
+/// A stand-in for a hardware keystore: "wraps" by XOR with a key it keeps.
+struct FakeProtector {
+    caps: ProtectorCaps,
+    key: u8,
+    mode: std::sync::Mutex<Mode>,
+}
+
+const HARDWARE: ProtectorCaps = ProtectorCaps {
+    hardware_backed: true,
+    rate_limited: true,
+    user_presence: true,
+};
+
+impl FakeProtector {
+    fn new(caps: ProtectorCaps) -> Arc<Self> {
+        Arc::new(Self {
+            caps,
+            key: 0x5a,
+            mode: std::sync::Mutex::new(Mode::Normal),
+        })
+    }
+
+    fn set(&self, mode: Mode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+}
+
+#[async_trait::async_trait]
+impl PlatformProtector for FakeProtector {
+    fn capabilities(&self) -> ProtectorCaps {
+        self.caps
+    }
+
+    async fn wrap(&self, _slot_id: String, secret: Vec<u8>) -> Result<Vec<u8>, ProtectorError> {
+        Ok(secret.iter().map(|b| b ^ self.key).collect())
+    }
+
+    async fn unwrap(&self, _slot_id: String, blob: Vec<u8>) -> Result<Vec<u8>, ProtectorError> {
+        match *self.mode.lock().unwrap() {
+            Mode::Cancel => Err(ProtectorError::Cancelled),
+            Mode::Invalidated => Err(ProtectorError::KeyInvalidated),
+            Mode::Normal => Ok(blob.iter().map(|b| b ^ self.key).collect()),
+        }
+    }
+
+    fn delete(&self, _slot_id: String) -> Result<(), ProtectorError> {
+        Ok(())
+    }
+}
+
+const FAKE: u8 = 1;
+
+#[test]
+fn a_local_slot_unlocks_and_cancel_or_invalidation_fall_back() {
+    let dirs = Dirs::new();
+    let vault = dirs.create().vault;
+    vault
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"x")])
+        .unwrap();
+    let protector = FakeProtector::new(HARDWARE);
+    ready(vault.enable_local_unlock(protector.clone(), FAKE)).unwrap();
+    assert_eq!(vault.local_unlocks().unwrap(), vec![FAKE]);
+
+    vault.lock();
+    assert_eq!(
+        vault.local_unlocks().unwrap(),
+        vec![FAKE],
+        "visible while locked"
+    );
+    ready(vault.unlock_local(protector.clone(), FAKE)).unwrap();
+    assert_eq!(vault.entries().unwrap().len(), 1);
+
+    vault.lock();
+    protector.set(Mode::Cancel);
+    assert!(matches!(
+        ready(vault.unlock_local(protector.clone(), FAKE)),
+        Err(VaultError::Cancelled)
+    ));
+    assert!(vault.is_locked());
+    assert_eq!(
+        vault.local_unlocks().unwrap(),
+        vec![FAKE],
+        "a cancel keeps the slot"
+    );
+
+    protector.set(Mode::Invalidated);
+    assert!(matches!(
+        ready(vault.unlock_local(protector.clone(), FAKE)),
+        Err(VaultError::KeyInvalidated)
+    ));
+    vault.unlock_password(PASSWORD.to_vec()).unwrap();
+    assert!(
+        vault.local_unlocks().unwrap().is_empty(),
+        "the slot is gone after the password unlock"
+    );
+}
+
+#[test]
+fn the_policy_refuses_weak_protectors_without_hardware_rate_limiting() {
+    let dirs = Dirs::new();
+    let vault = dirs.create().vault;
+    let software_pin = FakeProtector::new(ProtectorCaps {
+        hardware_backed: false,
+        rate_limited: false,
+        user_presence: true,
+    });
+    assert!(matches!(
+        ready(vault.enable_local_unlock(software_pin, FAKE)),
+        Err(VaultError::Policy { .. })
+    ));
+    // Unlocked with the login session instead (Secret Service): strong, allowed.
+    let session_keyring = FakeProtector::new(ProtectorCaps {
+        hardware_backed: false,
+        rate_limited: false,
+        user_presence: false,
+    });
+    ready(vault.enable_local_unlock(session_keyring, FAKE)).unwrap();
+}
+
+#[test]
+fn local_slots_follow_password_changes_without_another_prompt() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    let phone = dirs.open("phone");
+    let protector = FakeProtector::new(HARDWARE);
+    ready(phone.enable_local_unlock(protector.clone(), FAKE)).unwrap();
+
+    // Changed here: the phone still holds the slot secret from enrolling.
+    phone.change_password(b"second password".to_vec()).unwrap();
+    phone.lock();
+    let summary = ready(phone.unlock_local(protector.clone(), FAKE)).unwrap();
+    assert!(
+        !summary.key_rotated,
+        "the slot was re-wrapped to the new key"
+    );
+
+    // Changed on the laptop: the phone's slot opens only the old epoch, so it reads
+    // and asks for the password once, then re-wraps with the secret it just used.
+    laptop.lock();
+    laptop.unlock_password(b"second password".to_vec()).unwrap();
+    laptop.change_password(b"third password".to_vec()).unwrap();
+    phone.lock();
+    let summary = ready(phone.unlock_local(protector.clone(), FAKE)).unwrap();
+    assert!(summary.key_rotated);
+    phone.unlock_password(b"third password".to_vec()).unwrap();
+    phone.lock();
+    let summary = ready(phone.unlock_local(protector.clone(), FAKE)).unwrap();
+    assert!(!summary.key_rotated, "back to a one-step unlock");
+}
+
+#[test]
+fn without_the_secret_a_stale_slot_is_dropped() {
+    let dirs = Dirs::new();
+    let vault = dirs.create().vault;
+    let protector = FakeProtector::new(HARDWARE);
+    ready(vault.enable_local_unlock(protector, FAKE)).unwrap();
+    // A password unlock holds no slot secret, so a key change can't carry the slot over.
+    vault.lock();
+    vault.unlock_password(PASSWORD.to_vec()).unwrap();
+    vault.change_password(b"second password".to_vec()).unwrap();
+    assert!(vault.local_unlocks().unwrap().is_empty());
+}

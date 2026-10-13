@@ -459,6 +459,27 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 
 **Tests:** in-process fake protectors cover the core logic: `KeyInvalidated` meaning "slot gone", user cancellation, and capability reporting. Each real protector also gets a manual test checklist.
 
+**Status: stage A done (2026-10-13). Linux, macOS and the FIDO2 spike are stage B.**
+
+- **Core:**
+  - `Credential::LocalSlot` unlocks from a kind-4 slot.
+  - Session methods add, refresh, list and remove local slots. `refresh_local_slots` re-wraps a slot whose secret it holds, and drops stale ones it can't re-wrap.
+  - Rotation no longer clears local slots; a refresh re-wraps them or drops them as stale.
+  - `policy::check_platform_policy` treats a protector that prompts the user as Weak.
+- **FFI:** `local_unlocks`, `unlock_local` and `enable_local_unlock` (UniFFI async, awaiting the protector without holding the session), plus `disable_local_unlock`. The `Vault` keeps the slot secrets while unlocked, and a protector found invalidated has its slot removed at the next unlock.
+- **Protectors:**
+  - Windows Hello: Rust, `windows` crate, TPM 2.0 check for the capability report.
+  - Android Keystore: Kotlin, StrongBox or TEE, platform `BiometricPrompt` with a `CryptoObject`.
+  - Both use one hardware key per app, with the slot ID bound into each wrap.
+- **UI:** "Unlock with …" on the unlock screen, and an on/off switch in Settings.
+- **Tests:** fake protectors cover enabling, unlocking, cancel, invalidation, the policy refusal, re-wrapping after a password change on this device and on another, and dropping a stale slot.
+- **Manual checklist** (real prompts; the user completes them):
+  1. **Windows Hello:** create a vault, turn on "Unlock with Windows Hello" (one prompt, in front of the app), lock, unlock with Hello. Change the password, lock, unlock with Hello again: it should still work, with no password prompt.
+  2. **Android:** set a screen lock and fingerprint on the device, turn on device unlock, lock, unlock with the fingerprint. Then enroll another fingerprint: the next device unlock reports that it stopped working, and the password unlock removes the slot.
+- **Results (2026-10-13):**
+  - Windows Hello passed on the dev machine: enabling, unlocking, and unlocking again after a password change without a second prompt.
+  - On the Android emulator the keystore reports `SECURITY_LEVEL_SOFTWARE`, so the core refuses device unlock there, as the policy requires. The Android checklist needs a real device.
+
 ### Phase 11: Android storage and parity (M)
 
 - `RemoteStore` as a Kotlin foreign trait over the Storage Access Framework (SAF), so the user can pick a synced folder.

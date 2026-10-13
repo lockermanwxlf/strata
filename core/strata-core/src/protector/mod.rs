@@ -10,6 +10,19 @@
 //! implementation is Kotlin (Keystore has no NDK API) and is passed in through
 //! UniFFI's foreign-trait support. Implementations must stay thin: wrap,
 //! unwrap, delete. No format logic or policy belongs in them.
+//!
+//! An implementation may keep one hardware key for the whole app and bind the slot
+//! ID into each wrap (as associated data, or in a signed challenge). Then dropping a
+//! slot leaves nothing behind in the keystore, and `delete` does nothing. When the
+//! platform invalidates that key, every slot using it goes together.
+//!
+//! `protector_id`s (spec §11): 1 Android Keystore, 2 Windows Hello, 3 macOS Secure
+//! Enclave, 4 Linux TPM 2.0, 5 Linux Secret Service.
+
+use std::sync::Arc;
+
+#[cfg(windows)]
+mod windows_hello;
 
 /// What a protector's backing store actually guarantees. The core uses this to
 /// enforce slot policy (see `policy`), so implementations must report honestly:
@@ -65,4 +78,17 @@ pub trait PlatformProtector: Send + Sync {
 
     /// Destroy the hardware-bound key for `slot_id`.
     fn delete(&self, slot_id: String) -> Result<(), ProtectorError>;
+}
+
+/// Windows Hello (`protector_id` 2), if it's set up on this machine. `None` elsewhere.
+#[uniffi::export]
+pub fn windows_hello() -> Option<Arc<dyn PlatformProtector>> {
+    #[cfg(windows)]
+    {
+        windows_hello::WindowsHello::new().map(|h| Arc::new(h) as Arc<dyn PlatformProtector>)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }

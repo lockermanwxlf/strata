@@ -57,6 +57,23 @@ pub fn check_slot_policy(
     }
 }
 
+/// The strength of a platform protector's secret. One that prompts the user at
+/// unlock may accept a PIN (Windows Hello, the Android device credential), so it
+/// counts as Weak and needs hardware-backed rate limiting. One that unlocks with the
+/// OS session instead (Secret Service) is as strong as the login password: Strong.
+pub fn platform_strength(caps: &ProtectorCaps) -> ProtectorStrength {
+    if caps.user_presence {
+        ProtectorStrength::Weak
+    } else {
+        ProtectorStrength::Strong
+    }
+}
+
+/// Whether a local slot may be created with this protector (spec §6.2 "Policy").
+pub fn check_platform_policy(caps: &ProtectorCaps) -> Result<(), PolicyError> {
+    check_slot_policy(platform_strength(caps), SlotScope::Local, Some(*caps))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

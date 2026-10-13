@@ -37,6 +37,8 @@ internal class FakeHost(root: Path) : AppHost {
 
     override fun isVault(folder: String) = File(folder, "strata-vault").isFile
 
+    override val deviceProtector: DeviceProtector? = null
+
     override val clipboard = object : SecretClipboard {
         override fun copy(value: ByteArray) {
             copied += value.decodeToString()

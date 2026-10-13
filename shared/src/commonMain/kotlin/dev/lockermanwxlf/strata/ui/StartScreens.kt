@@ -155,6 +155,14 @@ fun UnlockScreen(c: VaultController) {
                 onClick = { c.unlock(password.takeUtf8()) },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Unlock") }
+            val device = c.deviceProtector
+            if (device != null && c.deviceUnlockEnabled) {
+                OutlinedButton(
+                    enabled = !c.busy,
+                    onClick = { c.unlockWithDevice() },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Unlock with ${device.label}") }
+            }
             TextButton(onClick = { useWords = true }) { Text("Use the recovery words instead") }
         } else {
             OutlinedTextField(

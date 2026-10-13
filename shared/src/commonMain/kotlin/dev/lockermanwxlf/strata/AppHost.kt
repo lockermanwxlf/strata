@@ -23,6 +23,9 @@ interface AppHost {
     /** Whether [folder] holds a vault (its `strata-vault` file). */
     fun isVault(folder: String): Boolean
 
+    /** Biometric or Windows Hello unlock on this device, or `null` if there is none. */
+    val deviceProtector: DeviceProtector?
+
     val clipboard: SecretClipboard
 
     /**

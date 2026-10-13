@@ -6,6 +6,7 @@ use std::cmp::Reverse;
 use subtle::ConstantTimeEq;
 
 use super::{Keyring, VaultFiles};
+use crate::crypto::SecretKey;
 use crate::crypto::kdf;
 use crate::crypto::random_id;
 use crate::crypto::recovery::{self, RecoveryKeyPair};
@@ -14,7 +15,9 @@ use crate::error::{AlarmKind, CoreError, Result};
 use crate::format::Id;
 use crate::format::epoch::EpochRecord;
 use crate::format::slot::{SlotFile, SlotParams};
+use crate::format::vault_info::{self, VaultInfo};
 use crate::local::{LocalState, LocalStore, Pin, SealedLocalState, StateRecord};
+use crate::policy::SlotScope;
 use crate::sync::RemoteStore;
 
 /// How many slots of the chosen kind unlock tries, newest first. Every password slot
@@ -27,6 +30,43 @@ pub enum Credential<'a> {
     Password(&'a [u8]),
     /// The 24 recovery words as typed, UTF-8.
     RecoveryWords(&'a [u8]),
+    /// A local slot's secret `S`, unwrapped by its platform protector (spec §11).
+    LocalSlot { slot_id: Id, secret: &'a SecretKey },
+}
+
+/// A local slot as the platform protector sees it: which slot, and the blob to unwrap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSlotInfo {
+    pub slot_id: Id,
+    pub protector_id: u8,
+    pub epoch: u32,
+    pub blob: Vec<u8>,
+}
+
+/// The local slots that can still unlock: those at or above the pin. Older ones only
+/// reach an epoch this device has moved past (spec §6.3 step 4). Reads only the
+/// unlock record, so it works while locked.
+pub fn local_slots(store: &dyn RemoteStore, local: &dyn LocalStore) -> Result<Vec<LocalSlotInfo>> {
+    let vault_id = VaultInfo::parse(&store.read("strata-vault", vault_info::LEN + 1)?)?.vault_id;
+    let Some(bytes) = local.load(&vault_id)? else {
+        return Ok(Vec::new());
+    };
+    let sealed = SealedLocalState::parse(&bytes)?;
+    Ok(sealed
+        .local_slots
+        .iter()
+        .filter_map(|b| SlotFile::parse(b, &vault_id, SlotScope::Local).ok())
+        .filter(|s| s.epoch >= sealed.pin.epoch)
+        .filter_map(|s| match s.params {
+            SlotParams::Platform { protector_id, blob } => Some(LocalSlotInfo {
+                slot_id: s.slot_id,
+                protector_id,
+                epoch: s.epoch,
+                blob,
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 pub struct Unlocked {
@@ -75,7 +115,17 @@ pub fn unlock(
 
     // Slots below the pinned epoch are stale (spec §6.3 step 4) and never tried.
     let min_epoch = pin.map_or(0, |p| p.epoch);
-    let keyring = open_keyring(&vault_id, &records, &slots, credential, min_epoch, |_| true)?;
+    let keyring = match credential {
+        Credential::LocalSlot { slot_id, secret } => open_local(
+            &vault_id,
+            &records,
+            sealed.as_ref(),
+            &slot_id,
+            secret,
+            min_epoch,
+        )?,
+        credential => open_keyring(&vault_id, &records, &slots, credential, min_epoch, |_| true)?,
+    };
     if let Some(pin) = pin {
         let reached = keyring.keys(pin.epoch).map(|k| k.key_id);
         if !reached.is_some_and(|id| bool::from(id.ct_eq(&pin.key_id))) {
@@ -153,7 +203,34 @@ pub(crate) fn open_keyring(
         Credential::RecoveryWords(words) => {
             open_recovery(vault_id, records, slots, words, min_epoch, accept)
         }
+        Credential::LocalSlot { .. } => Err(CoreError::rejected(
+            "credential",
+            "a local slot opens only this device's own key",
+        )),
     }
+}
+
+/// Opens a local slot (spec §11) with the secret its protector returned. Like any
+/// slot, its key must walk the chain, and the pin check in `unlock` applies after.
+fn open_local(
+    vault_id: &Id,
+    records: &[EpochRecord<'_>],
+    sealed: Option<&SealedLocalState<'_>>,
+    slot_id: &Id,
+    secret: &SecretKey,
+    min_epoch: u32,
+) -> Result<Keyring> {
+    let slot = sealed
+        .into_iter()
+        .flat_map(|s| s.local_slots.iter())
+        .filter_map(|b| SlotFile::parse(b, vault_id, SlotScope::Local).ok())
+        .find(|s| &s.slot_id == slot_id && s.epoch >= min_epoch)
+        .ok_or(CoreError::WrongCredential)?;
+    let kek = kdf::slot_kek(vault_id, slot_id, secret);
+    let ek = slot
+        .open_with_kek(&kek)
+        .map_err(|_| CoreError::WrongCredential)?;
+    Keyring::walk(vault_id, records, slot.epoch, ek)
 }
 
 fn open_password(

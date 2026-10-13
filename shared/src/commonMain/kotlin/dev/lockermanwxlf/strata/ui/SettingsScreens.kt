@@ -11,6 +11,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,7 +54,19 @@ fun SettingsScreen(c: VaultController) {
                 Text("Review flagged changes")
             }
         }
-        Hint("Unlocking with a fingerprint, face or security key comes in a later version.")
+        c.deviceProtector?.let { device ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Unlock with ${device.label}")
+                    Hint("On this device only. The password still works everywhere.")
+                }
+                Switch(
+                    checked = c.deviceUnlockEnabled,
+                    enabled = !c.busy,
+                    onCheckedChange = { c.setDeviceUnlock(it) },
+                )
+            }
+        }
         HorizontalDivider()
         SectionTitle("Vault")
         OutlinedButton(onClick = { c.open(Screen.Trash) }, modifier = Modifier.fillMaxWidth()) { Text("Trash") }

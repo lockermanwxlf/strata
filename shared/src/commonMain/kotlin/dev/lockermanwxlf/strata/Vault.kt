@@ -65,6 +65,21 @@ interface VaultHandle {
     /** Reverts every change flagged for review; returns how many edits that took. */
     suspend fun revertFlagged(): Int
 
+    /** The protector IDs with a local slot that can unlock this device. Works while locked. */
+    suspend fun localUnlocks(): List<Int>
+
+    /**
+     * Unlocks with [protector] (biometrics, Windows Hello), then syncs. Throws
+     * [StrataException.Reason.KEY_INVALIDATED] if the platform key is gone: unlock
+     * with the password instead, which also removes the dead slot.
+     */
+    suspend fun unlockLocal(protector: DeviceProtector): SyncSummary
+
+    /** Lets [protector] unlock this device from now on. Prompts once. */
+    suspend fun enableLocalUnlock(protector: DeviceProtector)
+
+    suspend fun disableLocalUnlock(protectorId: Int)
+
     /** Locks and releases the native handle. The handle can't be used afterwards. */
     fun close()
 }
@@ -99,6 +114,25 @@ object StrataCore {
 
     /** The usual folder for this device's local state on desktop systems. */
     fun defaultStateDir(): String? = nativeDefaultStateDir()
+
+    /** Windows Hello, if this is Windows and Hello is set up. */
+    fun windowsHello(): DeviceProtector? = nativeWindowsHello()
+}
+
+/**
+ * A platform protector that can unlock this device: biometrics, Windows Hello. The
+ * core talks to it; common code only passes it along. IDs follow spec §11.
+ */
+interface DeviceProtector {
+    val id: Int
+
+    /** What the UI calls it: "Windows Hello", "fingerprint or screen lock". */
+    val label: String
+
+    companion object {
+        const val ANDROID_KEYSTORE = 1
+        const val WINDOWS_HELLO = 2
+    }
 }
 
 // Implemented per platform on top of the generated bindings (NativeVault.kt).
@@ -120,6 +154,8 @@ internal expect fun nativeNewEntryId(): String
 internal expect fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteArray
 
 internal expect fun nativeDefaultStateDir(): String?
+
+internal expect fun nativeWindowsHello(): DeviceProtector?
 
 /** Overwrites the array with zeros. */
 fun ByteArray.wipe() = fill(0)
@@ -244,5 +280,12 @@ class StrataException(val reason: Reason, message: String, val alarm: Alarm? = n
         IO,
         NOT_FOUND,
         FIELD_CONFLICT,
+
+        /** The user dismissed the device-unlock prompt. */
+        CANCELLED,
+
+        /** The device-unlock key is gone (say, fingerprints changed): use the password. */
+        KEY_INVALIDATED,
+        PROTECTOR_UNAVAILABLE,
     }
 }

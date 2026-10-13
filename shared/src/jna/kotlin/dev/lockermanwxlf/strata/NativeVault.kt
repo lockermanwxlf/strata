@@ -6,6 +6,7 @@ package dev.lockermanwxlf.strata
 
 import dev.lockermanwxlf.strata.StrataException.Reason
 import dev.lockermanwxlf.strata.core.ffi.AlarmKind
+import dev.lockermanwxlf.strata.core.ffi.PlatformProtector
 import dev.lockermanwxlf.strata.core.ffi.Vault
 import dev.lockermanwxlf.strata.core.ffi.VaultException
 import dev.lockermanwxlf.strata.core.ffi.coreVersion
@@ -19,6 +20,7 @@ import dev.lockermanwxlf.strata.core.ffi.defaultStateDir as ffiDefaultStateDir
 import dev.lockermanwxlf.strata.core.ffi.generatePassword as ffiGeneratePassword
 import dev.lockermanwxlf.strata.core.ffi.newEntryId as ffiNewEntryId
 import dev.lockermanwxlf.strata.core.ffi.passwordStrength as ffiPasswordStrength
+import dev.lockermanwxlf.strata.core.ffi.windowsHello as ffiWindowsHello
 
 internal actual fun nativeVersion(): String = coreVersion()
 
@@ -49,6 +51,22 @@ internal actual fun nativeGeneratePassword(length: Int, symbols: Boolean): ByteA
     mapped { ffiGeneratePassword(length.toUInt(), symbols) }
 
 internal actual fun nativeDefaultStateDir(): String? = ffiDefaultStateDir()
+
+internal actual fun nativeWindowsHello(): DeviceProtector? =
+    ffiWindowsHello()?.let { NativeProtector(DeviceProtector.WINDOWS_HELLO, "Windows Hello", it) }
+
+/** Wraps a platform protector (Kotlin on Android, Rust on desktop) for common code. */
+fun deviceProtector(id: Int, label: String, protector: PlatformProtector): DeviceProtector =
+    NativeProtector(id, label, protector)
+
+private class NativeProtector(
+    override val id: Int,
+    override val label: String,
+    val protector: PlatformProtector,
+) : DeviceProtector
+
+private fun DeviceProtector.native(): PlatformProtector =
+    (this as? NativeProtector)?.protector ?: error("not a protector from deviceProtector()")
 
 private class NativeVault(private val vault: Vault) : VaultHandle {
     override val isLocked: Boolean
@@ -159,12 +177,36 @@ private class NativeVault(private val vault: Vault) : VaultHandle {
 
     override suspend fun revertFlagged() = background { vault.revertFlagged().toInt() }
 
+    override suspend fun localUnlocks() = background { vault.localUnlocks().map { it.toInt() and 0xff } }
+
+    override suspend fun unlockLocal(protector: DeviceProtector) = backgroundSuspend {
+        vault.unlockLocal(protector.native(), protector.id.toUByte()).common()
+    }
+
+    override suspend fun enableLocalUnlock(protector: DeviceProtector) = backgroundSuspend {
+        vault.enableLocalUnlock(protector.native(), protector.id.toUByte())
+    }
+
+    override suspend fun disableLocalUnlock(protectorId: Int) = background {
+        vault.disableLocalUnlock(protectorId.toUByte())
+    }
+
     override fun close() = vault.close()
 }
 
 /** Runs a core call off the calling thread, with its errors mapped. */
 private suspend fun <T> background(block: () -> T): T =
     withContext(Dispatchers.IO) { mapped(block) }
+
+/** [background] for the core's async calls, which wait on a platform prompt. */
+private suspend fun <T> backgroundSuspend(block: suspend () -> T): T =
+    withContext(Dispatchers.IO) {
+        try {
+            block()
+        } catch (e: VaultException) {
+            throw e.common()
+        }
+    }
 
 /** Runs [block], then wipes [secret] whether or not it succeeded. */
 private inline fun <T> consuming(secret: ByteArray, block: () -> T): T =
@@ -201,6 +243,12 @@ private fun VaultException.common(): StrataException {
         is VaultException.Io -> StrataException(Reason.IO, "storage error: $detail")
         is VaultException.NotFound -> StrataException(Reason.NOT_FOUND, "no such $what")
         is VaultException.FieldConflict -> StrataException(Reason.FIELD_CONFLICT, "the field has conflicting values")
+        is VaultException.Cancelled -> StrataException(Reason.CANCELLED, "cancelled")
+        is VaultException.KeyInvalidated -> StrataException(
+            Reason.KEY_INVALIDATED,
+            "Device unlock stopped working (for example, fingerprints changed). Unlock with the password.",
+        )
+        is VaultException.ProtectorUnavailable -> StrataException(Reason.PROTECTOR_UNAVAILABLE, "device unlock unavailable: $detail")
     }
 }
 
