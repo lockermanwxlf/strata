@@ -74,6 +74,21 @@ interface VaultHandle {
     /** Every entry not in the trash, as a KeePass file under [password] (wiped). Not protected by Strata. */
     suspend fun exportKdbx(password: ByteArray): ExportedFile
 
+    /**
+     * How many files this device's copy of the vault holds that the folder is missing,
+     * because a sync tool lost or rolled them back. Works while locked.
+     */
+    suspend fun restorableFiles(): Int
+
+    /** Puts those files back. Unlocked, it then checks the folder again: see [RestoreSummary.sync]. */
+    suspend fun restoreFromCopy(): RestoreSummary
+
+    /**
+     * Accepts the folder as it is: this device forgets its state for the vault and locks,
+     * and its next unlock starts over as a new device. Device unlock has to be set up again.
+     */
+    suspend fun startOver()
+
     /** The protector IDs with a local slot that can unlock this device. Works while locked. */
     suspend fun localUnlocks(): List<Int>
 
@@ -331,6 +346,9 @@ data class ImportSummary(
     val skipped: Int,
     val customIcons: Int,
 )
+
+/** What [VaultHandle.restoreFromCopy] did. [sync] is `null` when it ran locked: unlock next. */
+data class RestoreSummary(val restored: Int, val sync: SyncSummary?)
 
 /** A KeePass file made from the vault: encrypted, but not by Strata. */
 class ExportedFile(val bytes: ByteArray, val entries: Int, val conflicts: Int, val skipped: Int)

@@ -567,6 +567,20 @@ On an alarm, the device stops writing to the remote, keeps working from its loca
 
 A device whose local state is lost or restored from a backup MUST become a new client with a fresh `client_id`. Reusing a `client_id` with a rewound seq counter is indistinguishable from a fork. Android backup is already disabled. Writers MUST durably persist `next_seq` before uploading an event.
 
+### 9.5 This device's copy, and repair
+
+The vault folder is the only place a vault's contents live, and a sync tool that wipes or rolls it back takes every device with it. So each device SHOULD keep its own copy of the vault files in its local state directory, and offer to put back what goes missing. The files are encrypted and immutable, so the copy is plain file copying, and is no more sensitive than the folder.
+
+- **Keeping the copy:**
+  - Every file the device writes goes into its copy.
+  - After every sync that raised no alarm (and found no newer key it lacks), the copy is made to match the folder.
+  - Files the vault removed on purpose then leave the copy too: covered events, replaced snapshots, slots of past epochs, and everything a purge deleted. A restore can therefore never bring back a purged entry.
+  - Two kinds of file stay in the copy even when the folder no longer has them, because their loss raises no alarm: `strata-vault`, and the slots of the device's current epoch.
+- **After an alarm** the copy is left alone: it holds the last state the device found healthy. The user can then:
+  - **Restore.** Put back every file the copy has and the folder lacks, never overwriting a file that exists. Then clear the alarm and sync again, so every check runs afresh. An alarm whose cause the restore fixed doesn't come back. This also works while locked, since an alarm at unlock keeps the vault locked: put the files back, then unlock.
+  - **Start over.** Accept the folder as it is: the device deletes its local state, and its next unlock is that of a new device (§6.3). It pins the folder's newest epoch on trust, as a fresh install would.
+  - The repair is a user decision. Nothing in this section runs on its own.
+
 ## 10. Snapshots
 
 ### 10.1 Format

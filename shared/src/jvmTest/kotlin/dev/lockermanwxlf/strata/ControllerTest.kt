@@ -199,6 +199,58 @@ class ControllerTest {
         assertTrue(c.unlocked)
     }
 
+    /** The folder's files, by path, as a backup or a sync tool's version history would keep them. */
+    private fun folderFiles(): Map<String, ByteArray> {
+        val root = File(vaultDir)
+        return root.walkTopDown().filter { it.isFile }.associate { it.relativeTo(root).path to it.readBytes() }
+    }
+
+    private fun replaceFolder(files: Map<String, ByteArray>) {
+        File(vaultDir).listFiles()!!.forEach { it.deleteRecursively() }
+        files.forEach { (path, bytes) -> File(vaultDir, path).apply { parentFile.mkdirs() }.writeBytes(bytes) }
+    }
+
+    @Test
+    fun aRolledBackFolderIsRepairedFromThisDevicesCopy() = runBlocking<Unit> {
+        val c = created()
+        c.save(listOf(EntryEdit.SetField(c.newEntryId(), "title", "Old".encodeToByteArray()))) {}.join()
+        c.sync().join()
+        val backup = folderFiles()
+        c.save(listOf(EntryEdit.SetField(c.newEntryId(), "title", "New".encodeToByteArray()))) {}.join()
+        c.sync().join()
+
+        // The sync tool goes back to the older folder: an alarm, and files to put back.
+        replaceFolder(backup)
+        c.sync().join()
+        assertNotNull(c.status?.alarm)
+        assertTrue(c.restorable > 0)
+        c.restoreFromCopy().join()
+        assertEquals(null, c.status?.alarm)
+        assertEquals(0, c.restorable)
+        assertEquals(listOf("New", "Old"), c.visibleEntries.map { it.title })
+
+        // Wiped while locked: the unlock screen offers the files back, then unlock works.
+        c.lock().join()
+        replaceFolder(emptyMap())
+        c.unlock(pw()).join()
+        assertEquals(Screen.Unlock, c.screen)
+        assertTrue(c.restorable > 0)
+        c.restoreFromCopy().join()
+        c.unlock(pw()).join()
+        assertEquals(Screen.Entries, c.screen)
+        assertEquals(listOf("New", "Old"), c.visibleEntries.map { it.title })
+
+        // Or go back on purpose: start over on the older folder.
+        replaceFolder(backup)
+        c.sync().join()
+        assertNotNull(c.status?.alarm)
+        c.startOver().join()
+        assertEquals(Screen.Unlock, c.screen)
+        c.unlock(pw()).join()
+        assertEquals(null, c.status?.alarm)
+        assertEquals(listOf("Old"), c.visibleEntries.map { it.title })
+    }
+
     @Test
     fun keepassImportAndExport() = runBlocking<Unit> {
         val c = created()

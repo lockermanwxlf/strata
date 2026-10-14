@@ -56,6 +56,7 @@ vault/
 - **Compaction:** snapshots keep the causal metadata of the ops they retain, so compaction is exact at any time. Event files a snapshot covers are deleted after a grace period. True purge rewrites history and rotates the epoch.
 - **Rollback/fork detection:** each client hash-chains its own events. Every device stores the last-seen seq per client, and a regression raises an alarm.
 - **Size padding:** pad payloads to size buckets.
+- **This device's copy** (`sync/mirror.rs`, spec §9.5): every device keeps a copy of the vault files in its state directory, updated after each healthy sync, so a wiped or rolled-back folder can be restored. The copy follows deliberate deletions (GC, purge, old slots), so a restore never undoes a purge.
 - **KDBX is import/export only** (`kdbx/`, spec §8.2.1). Preserve unknown fields on round trips: KeePass data without a Strata field travels in `kdbx:` fields, which the entry screens hide. The `keepass` crate brings KDBX's own crypto (AES, Twofish, ChaCha20, Argon2d); it only ever touches the KeePass file, never the vault.
 
 ## Rules for working on crypto

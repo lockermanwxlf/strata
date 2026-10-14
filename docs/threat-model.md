@@ -54,6 +54,18 @@ They can read, delete, reorder and replay files, roll them back to older version
 | Secrets cross the FFI only as byte arrays, wiped on both sides | `shared/.../VaultTest.kt` (Kotlin) checks that arguments are wiped |
 | Concurrent secret edits keep both values | `merge/tests.rs::concurrent_secret_writes_conflict_until_resolved`, `ffi/tests.rs::two_devices_sync_and_see_conflicts` |
 
+## Not losing data
+
+These aren't claims of spec §1, which is about attackers, but they are what users rely on most.
+
+| Claim | Mechanism | Tests |
+|---|---|---|
+| A wiped or rolled-back folder can be restored | Each device's own copy of the vault files, updated after every healthy sync; repair by restore or start over (§9.5) | `ffi/tests.rs::a_wiped_folder_comes_back_from_this_devices_copy`, `a_rolled_back_folder_is_repaired_or_accepted`, `a_vanished_password_slot_is_kept_and_restored`; Kotlin `ControllerTest.aRolledBackFolderIsRepairedFromThisDevicesCopy` |
+| A restore never undoes a purge or overwrites a file | The copy follows deliberate deletions; restores only create | `ffi/tests.rs::a_purge_stays_purged_in_every_copy`, `sync/mirror.rs::writes_are_copied_and_restore_never_overwrites` |
+| Files are never modified in place | Create-only writes (§5) | `sync/fs_store.rs::create_never_overwrites_and_list_skips_temp_files`, `sync/foreign_store.rs::behaves_like_a_store` |
+| Compaction loses nothing | Exact reduction (§9.3) | `sync/session/tests.rs::compaction_never_changes_the_vault`, `after_compaction_a_fresh_device_still_sees_everything` |
+| Concurrent password changes keep both values | Secret fields conflict instead of overwriting (§9.2) | `merge/tests.rs::concurrent_secret_writes_conflict_until_resolved` |
+
 ## What Strata does not protect against
 
 These are the limits in spec §1, and the residual risks found in the Phase 13 audit.

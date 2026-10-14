@@ -204,6 +204,22 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
         self.alarm
     }
 
+    /// The epoch of the newest key this device holds.
+    pub fn current_epoch(&self) -> u32 {
+        self.keyring.current()
+    }
+
+    pub fn vault_id(&self) -> Id {
+        self.vault_id
+    }
+
+    /// Clears the alarm and syncs again, after the user repaired the folder (spec
+    /// §9.5). Every check runs afresh, so an alarm whose cause remains comes back.
+    pub fn recheck(&mut self) -> Result<SyncReport> {
+        self.alarm = None;
+        self.sync()
+    }
+
     fn raise(&mut self, kind: AlarmKind) -> CoreError {
         self.alarm = Some(kind);
         CoreError::Alarm(kind)

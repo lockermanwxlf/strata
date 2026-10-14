@@ -271,6 +271,9 @@ pub trait LocalStore: Send + Sync {
     /// Replaces the state atomically: after a crash either the old or the new state
     /// is there, never a mix.
     fn save(&self, vault_id: &Id, bytes: &[u8]) -> Result<()>;
+
+    /// Deletes the state, so the next unlock starts over as a new device (spec §9.5).
+    fn forget(&self, vault_id: &Id) -> Result<()>;
 }
 
 /// Delegates through a handle: a session can borrow its store or share it.
@@ -282,6 +285,9 @@ macro_rules! delegate_local_store {
             }
             fn save(&self, vault_id: &Id, bytes: &[u8]) -> Result<()> {
                 (**self).save(vault_id, bytes)
+            }
+            fn forget(&self, vault_id: &Id) -> Result<()> {
+                (**self).forget(vault_id)
             }
         }
     )*};
@@ -347,6 +353,13 @@ impl LocalStore for FsLocalStore {
         std::fs::File::open(&self.dir)?.sync_all()?;
         Ok(())
     }
+
+    fn forget(&self, vault_id: &Id) -> Result<()> {
+        match std::fs::remove_file(self.path(vault_id)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -378,6 +391,11 @@ impl LocalStore for MemoryLocalStore {
             .lock()
             .unwrap()
             .insert(*vault_id, bytes.to_vec());
+        Ok(())
+    }
+
+    fn forget(&self, vault_id: &Id) -> Result<()> {
+        self.entries.lock().unwrap().remove(vault_id);
         Ok(())
     }
 }

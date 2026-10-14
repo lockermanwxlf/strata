@@ -3,6 +3,7 @@ package dev.lockermanwxlf.strata.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import dev.lockermanwxlf.strata.Alarm
 import dev.lockermanwxlf.strata.AppHost
 import dev.lockermanwxlf.strata.DeviceProtector
 import dev.lockermanwxlf.strata.EntryEdit
@@ -104,6 +105,17 @@ class VaultController(
     var alarmAcknowledged by mutableStateOf(false)
         private set
 
+    /** An alarm raised at unlock, which keeps the vault locked (spec §9.5). */
+    var unlockAlarm by mutableStateOf<Alarm?>(null)
+        private set
+
+    /**
+     * Files this device's copy can put back into the vault folder: nonzero after a
+     * sync tool lost or rolled back files. Checked when there's reason to.
+     */
+    var restorable by mutableStateOf(0)
+        private set
+
     private var vault: VaultHandle? = null
     private var lastInput = TimeSource.Monotonic.markNow()
     private var clipboardJob: Job? = null
@@ -179,6 +191,7 @@ class VaultController(
         reset(Screen.Unlock)
         scope.launch { refreshDeviceUnlock() }
         scope.launch { folderLabel = describe(chosen) }
+        scope.launch { refreshRestorable() }
     }
 
     private suspend fun refreshDeviceUnlock() {
@@ -194,7 +207,7 @@ class VaultController(
         val v = vault ?: return@perform
         val p = deviceProtector ?: return@perform
         try {
-            afterSync(v.unlockLocal(p, pin))
+            unlocking { v.unlockLocal(p, pin) }
         } catch (e: StrataException) {
             if (e.reason == StrataException.Reason.KEY_INVALIDATED) deviceUnlockEnabled = false
             throw e
@@ -236,7 +249,7 @@ class VaultController(
 
     fun unlock(password: ByteArray) = perform {
         val v = vault ?: return@perform
-        afterSync(v.unlockPassword(password))
+        unlocking { v.unlockPassword(password) }
         alarmAcknowledged = false
         lastInput = TimeSource.Monotonic.markNow()
         reset(Screen.Entries)
@@ -244,7 +257,7 @@ class VaultController(
 
     fun unlockWithRecoveryWords(words: ByteArray) = perform {
         val v = vault ?: return@perform
-        afterSync(v.unlockRecovery(words))
+        unlocking { v.unlockRecovery(words) }
         alarmAcknowledged = false
         lastInput = TimeSource.Monotonic.markNow()
         reset(Screen.Entries)
@@ -326,10 +339,31 @@ class VaultController(
         refresh()
     }
 
+    /** Runs an unlock. If it fails, say because of an alarm or missing files, checks what this device's copy could put back. */
+    private suspend fun unlocking(block: suspend () -> SyncSummary) {
+        try {
+            afterSync(block())
+        } catch (e: StrataException) {
+            unlockAlarm = e.alarm
+            refreshRestorable()
+            throw e
+        }
+        unlockAlarm = null
+    }
+
+    private suspend fun refreshRestorable() {
+        restorable = try {
+            vault?.restorableFiles() ?: 0
+        } catch (_: StrataException) {
+            0
+        }
+    }
+
     private suspend fun refresh() {
         val v = vault ?: return
         status = v.status()
         entries = if (status?.locked == false) v.entries() else emptyList()
+        if (status?.alarm != null) refreshRestorable() else if (status?.locked == false) restorable = 0
         // An unlock or a key change can drop or re-wrap the local slot.
         refreshDeviceUnlock()
     }
@@ -414,6 +448,42 @@ class VaultController(
         val n = vault?.revertFlagged() ?: return@perform
         refresh()
         message = if (n == 0) "Nothing to revert." else "Reverted $n change${if (n == 1) "" else "s"}."
+    }
+
+    // ---- Repair (spec §9.5) -------------------------------------------------------------
+
+    /** Puts back the files the folder lost from this device's copy, then checks the vault again. */
+    fun restoreFromCopy() = perform {
+        val v = vault ?: return@perform
+        val r = v.restoreFromCopy()
+        val sync = r.sync
+        if (sync != null) {
+            afterSync(sync)
+            alarmAcknowledged = false
+        }
+        unlockAlarm = null
+        refreshRestorable()
+        message = buildString {
+            append("Put back ${count(r.restored, "file")} from this device's copy.")
+            when {
+                sync == null -> append(" Unlock to check the vault.")
+                sync.alarm != null -> append(" The alarm remains: this device's copy doesn't cover what's wrong.")
+                else -> append(" The vault checks out again.")
+            }
+        }
+    }
+
+    /** Accepts the folder as it is: this device starts over as a new device at the next unlock. */
+    fun startOver() = perform {
+        val v = vault ?: return@perform
+        v.startOver()
+        entries = emptyList()
+        unlockAlarm = null
+        restorable = 0
+        deviceUnlockEnabled = false
+        status = v.status()
+        reset(Screen.Unlock)
+        message = "This device starts over. Unlock to read the vault as the folder has it now."
     }
 
     // ---- KeePass ---------------------------------------------------------------------

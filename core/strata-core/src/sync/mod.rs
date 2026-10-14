@@ -5,11 +5,13 @@
 
 pub mod foreign_store;
 pub mod fs_store;
+pub mod mirror;
 pub mod session;
 pub mod store;
 
 pub use foreign_store::{FolderError, ForeignFolder, ForeignStore};
 pub use fs_store::FsStore;
+pub use mirror::{Mirror, MirroredStore};
 pub use session::{
     GarbageReport, PurgeReport, RecoveryChoice, Rotated, Session, SessionOf, SyncReport,
 };

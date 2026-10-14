@@ -770,3 +770,187 @@ fn the_remote_learns_no_contents_and_only_padded_sizes() {
     };
     assert_eq!(size_of_event_with(b"a"), size_of_event_with(&[b'a'; 40]));
 }
+
+// ---- This device's copy and repair (spec §9.5) ----------------------------------
+
+/// Removes everything in `dir`, as a sync tool that wiped the folder would.
+fn wipe(dir: &std::path::Path) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+/// Copies the vault folder, files only, as a backup or version history would.
+fn copy_folder(from: &std::path::Path, to: &std::path::Path) {
+    for (path, bytes) in all_files(from) {
+        let target = to.join(path.strip_prefix(from).unwrap());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(target, bytes).unwrap();
+    }
+}
+
+fn titles(vault: &Vault) -> Vec<String> {
+    let mut t: Vec<String> = vault
+        .entries()
+        .unwrap()
+        .into_iter()
+        .filter(|e| !e.deleted)
+        .filter_map(|e| e.title)
+        .collect();
+    t.sort();
+    t
+}
+
+#[test]
+fn a_wiped_folder_comes_back_from_this_devices_copy() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"Bank")])
+        .unwrap();
+    laptop.sync().unwrap();
+
+    // Wiped while open: the next sync raises an alarm, and the copy repairs it.
+    wipe(dirs.vault.path());
+    assert!(laptop.sync().unwrap().alarm.is_some());
+    assert!(laptop.restorable_files().unwrap() > 0);
+    let restored = laptop.restore_from_copy().unwrap();
+    assert!(restored.restored > 0);
+    assert_eq!(restored.sync.unwrap().alarm, None);
+    assert_eq!(laptop.restorable_files().unwrap(), 0);
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"Mail")])
+        .unwrap();
+
+    // Wiped while locked: unlock fails, the copy is still found, and unlock then works.
+    laptop.sync().unwrap();
+    laptop.lock();
+    wipe(dirs.vault.path());
+    assert!(laptop.unlock_password(PASSWORD.to_vec()).is_err());
+    assert!(laptop.restorable_files().unwrap() > 0);
+    let restored = laptop.restore_from_copy().unwrap();
+    assert!(restored.restored > 0 && restored.sync.is_none());
+    let summary = laptop.unlock_password(PASSWORD.to_vec()).unwrap();
+    assert_eq!(summary.alarm, None);
+    assert_eq!(titles(&laptop), ["Bank", "Mail"]);
+
+    // Another device sees everything too.
+    assert_eq!(titles(&dirs.open("phone")), ["Bank", "Mail"]);
+}
+
+#[test]
+fn a_rolled_back_folder_is_repaired_or_accepted() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"Old")])
+        .unwrap();
+    laptop.sync().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    copy_folder(dirs.vault.path(), backup.path());
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"New")])
+        .unwrap();
+    laptop.sync().unwrap();
+
+    // The sync tool restores the older version of the folder.
+    let roll_back = || {
+        wipe(dirs.vault.path());
+        copy_folder(backup.path(), dirs.vault.path());
+    };
+    roll_back();
+    let summary = laptop.sync().unwrap();
+    assert_eq!(summary.alarm, Some(AlarmKind::Rollback));
+    assert!(
+        laptop
+            .apply(vec![set(&new_entry_id().unwrap(), "title", b"x")])
+            .is_err()
+    );
+
+    // Restoring brings back the newer change, and the vault is writable again.
+    let restored = laptop.restore_from_copy().unwrap();
+    assert_eq!(restored.sync.unwrap().alarm, None);
+    assert_eq!(titles(&laptop), ["New", "Old"]);
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"Newer")])
+        .unwrap();
+    laptop.sync().unwrap();
+
+    // Or the user meant to go back: starting over accepts the folder as it is.
+    roll_back();
+    assert!(laptop.sync().unwrap().alarm.is_some());
+    laptop.start_over_on_this_device().unwrap();
+    assert!(laptop.is_locked());
+    let summary = laptop.unlock_password(PASSWORD.to_vec()).unwrap();
+    assert_eq!(summary.alarm, None);
+    assert_eq!(titles(&laptop), ["Old"]);
+    laptop
+        .apply(vec![set(&new_entry_id().unwrap(), "title", b"After")])
+        .unwrap();
+    assert_eq!(titles(&dirs.open("phone")), ["After", "Old"]);
+}
+
+#[test]
+fn a_purge_stays_purged_in_every_copy() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    let phone = dirs.open("phone");
+    let secret = new_entry_id().unwrap();
+    laptop
+        .apply(vec![
+            set(&secret, "title", b"Purge me"),
+            set(&new_entry_id().unwrap(), "title", b"Keep"),
+        ])
+        .unwrap();
+    phone.sync().unwrap();
+
+    laptop.purge(secret, PASSWORD.to_vec()).unwrap();
+    // The phone follows the rotation, and its next healthy sync updates its copy.
+    phone.lock();
+    phone.unlock_password(PASSWORD.to_vec()).unwrap();
+    phone.sync().unwrap();
+
+    // Even after a wipe and a restore from the phone, the entry stays gone: the
+    // restore puts back exactly the folder as it was after the purge, without the
+    // purged files, which the phone dropped from its copy.
+    let names = |dir: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut n: Vec<_> = all_files(dir)
+            .into_iter()
+            .map(|(p, _)| p.strip_prefix(dir).unwrap().to_path_buf())
+            .collect();
+        n.sort();
+        n
+    };
+    let after_purge = names(dirs.vault.path());
+    wipe(dirs.vault.path());
+    phone.sync().unwrap();
+    phone.restore_from_copy().unwrap();
+    assert_eq!(names(dirs.vault.path()), after_purge);
+    assert_eq!(titles(&dirs.open("tablet")), ["Keep"]);
+}
+
+#[test]
+fn a_vanished_password_slot_is_kept_and_restored() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    laptop.sync().unwrap();
+    let slots = dirs.vault.path().join("slots");
+    let slot_files: Vec<_> = std::fs::read_dir(&slots)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    for slot in &slot_files {
+        std::fs::remove_file(slot).unwrap();
+    }
+    // No alarm covers slots, but the copy keeps the current epoch's.
+    laptop.sync().unwrap();
+    assert_eq!(laptop.restorable_files().unwrap(), count(slot_files.len()));
+    laptop.restore_from_copy().unwrap();
+    // A new device can unlock with the password again.
+    dirs.open("phone");
+}

@@ -600,6 +600,30 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
   - SAF cloud providers.
   - FIDO2, which waits on a domain.
 
+### After Phase 13: data integrity
+
+The vault folder was the only place a vault's contents lived, so a sync tool that wiped or rolled it back took every device with it. And an alarm, which a rollback raises on purpose, left a device read-only with no way out.
+
+**Done (2026-10-14):** each device's copy of the vault files, and repair (spec §9.5).
+
+- **Core:**
+  - `sync/mirror.rs` holds the copy, at `<state dir>/mirror/<vault id>`, and `MirroredStore` copies this device's writes into it.
+  - After every healthy sync, the copy is made to match the folder. Exceptions: `strata-vault` and the current epoch's slots stay, since their loss raises no alarm.
+  - `Session::recheck` clears an alarm and syncs afresh, and `LocalStore::forget` deletes a device's state.
+  - FFI: `restorable_files`, `restore_from_copy` (works locked too) and `start_over_on_this_device`.
+- **UI:** the alarm screen, and the unlock screen when unlock hits an alarm or missing files, offer to put back the missing files, or to accept the folder as it is, after a confirmation.
+- **Tests:**
+  - A wiped folder, both open and locked.
+  - A rollback, both restored and accepted.
+  - A purge that stays purged after a restore: the restored folder equals the folder just after the purge.
+  - A vanished password slot.
+  - Never overwriting, and the controller flow.
+
+**Next:**
+
+1. A half-written file left by a crash on storage without atomic renames (FAT/exFAT, some network shares, some Android providers) makes the device's own retry look like a fork. The retry should recognize its own unfinished file.
+2. Optionally: notes keep both values on concurrent edits, like secret fields.
+
 ## 4. Order and parallelism
 
 ```

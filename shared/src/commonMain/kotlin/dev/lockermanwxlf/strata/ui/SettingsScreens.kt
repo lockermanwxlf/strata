@@ -233,14 +233,56 @@ fun AlarmScreen(c: VaultController, alarm: Alarm) {
         Banner(alarmText(alarm), warning = true)
         Text(
             "The vault is read-only on this device until this is sorted out. Don't add new secrets. " +
-                "Check the vault folder's history (backups, sync conflicts), and compare with your other devices.",
+                "If you restored an older copy of the vault folder yourself, or a sync tool lost files, " +
+                "that explains it.",
         )
+        RepairOptions(c, alarmed = true)
+        HorizontalDivider()
         Button(onClick = { c.acknowledgeAlarm() }, modifier = Modifier.fillMaxWidth()) { Text("Keep reading") }
         OutlinedButton(onClick = { c.lock() }, modifier = Modifier.fillMaxWidth()) { Text("Lock") }
     }
 }
 
-private fun alarmText(alarm: Alarm) = when (alarm) {
+/**
+ * The ways out of an alarm or a damaged folder (spec §9.5): put back what this device's
+ * copy has, or accept the folder as it is. [alarmed] offers the second.
+ */
+@Composable
+fun RepairOptions(c: VaultController, alarmed: Boolean) {
+    var startingOver by remember { mutableStateOf(false) }
+    if (c.restorable > 0) {
+        Text(
+            "This device has its own copy of ${c.restorable} file${if (c.restorable == 1) "" else "s"} " +
+                "the vault folder is missing. Putting them back keeps every change, and is safe: " +
+                "nothing in the folder is overwritten.",
+        )
+        Button(enabled = !c.busy, onClick = { c.restoreFromCopy() }, modifier = Modifier.fillMaxWidth()) {
+            Text("Put back the missing files")
+        }
+    }
+    if (alarmed) {
+        OutlinedButton(enabled = !c.busy, onClick = { startingOver = true }, modifier = Modifier.fillMaxWidth()) {
+            Text("Accept the folder as it is")
+        }
+    }
+    if (startingOver) {
+        ConfirmDialog(
+            title = "Accept the folder as it is?",
+            text = "This device forgets what it knew about the vault and starts over as a new device, " +
+                "trusting the folder as it is now. Changes the folder no longer has disappear from " +
+                "this device (another device may still have them). Device unlock has to be turned on again. " +
+                "Only do this if you meant to go back to an older copy of the folder.",
+            confirmLabel = "Start over",
+            onDismiss = { startingOver = false },
+            onConfirm = {
+                startingOver = false
+                c.startOver()
+            },
+        )
+    }
+}
+
+internal fun alarmText(alarm: Alarm) = when (alarm) {
     Alarm.ROLLBACK -> "Files this device had already seen are missing or older than before. Someone may have " +
         "restored an old copy of the vault folder to hide changes."
     Alarm.FORK -> "Two different versions of the same history exist. A device may have been cloned, or the " +

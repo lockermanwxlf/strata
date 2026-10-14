@@ -151,6 +151,14 @@ fun UnlockScreen(c: VaultController) {
 
     ScreenFrame("Unlock") {
         c.folderLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        val alarm = c.unlockAlarm
+        if (alarm != null || c.restorable > 0) {
+            Banner(
+                alarm?.let(::alarmText) ?: "Files are missing from the vault folder: a sync tool may have lost them.",
+                warning = true,
+            )
+            RepairOptions(c, alarmed = alarm != null)
+        }
         if (!useWords) {
             PasswordField(password, "Password")
             Button(

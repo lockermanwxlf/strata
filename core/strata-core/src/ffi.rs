@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -20,6 +21,7 @@ use crate::crypto::{SecretBytes, SecretKey, generate, random_id};
 use crate::error::{AlarmKind, CoreError};
 use crate::format::Id;
 use crate::format::body::Op;
+use crate::format::vault_info::{self, VaultInfo};
 use crate::kdbx::{self, KdbxError};
 use crate::keys::create::create_vault as create_vault_files;
 use crate::keys::strength;
@@ -30,7 +32,7 @@ use crate::merge::view::{EntryView, Field};
 use crate::policy::check_platform_policy;
 use crate::protector::{PlatformProtector, ProtectorError};
 use crate::sync::session::{GC_GRACE_MS, PurgeReport, Rotated, SessionOf, SyncReport};
-use crate::sync::{ForeignFolder, ForeignStore, FsStore, RemoteStore};
+use crate::sync::{ForeignFolder, ForeignStore, FsStore, Mirror, MirroredStore, RemoteStore};
 
 type FfiSession = SessionOf<Arc<dyn RemoteStore>, Arc<dyn LocalStore>>;
 
@@ -133,6 +135,16 @@ impl From<CoreError> for VaultError {
 }
 
 type Result<T, E = VaultError> = std::result::Result<T, E>;
+
+/// What `restore_from_copy` did.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct RestoreSummary {
+    /// Files put back into the folder.
+    pub restored: u32,
+    /// The check that followed, when the vault was unlocked: its `alarm` is `None`
+    /// if the restore fixed what raised it.
+    pub sync: Option<SyncSummary>,
+}
 
 /// What a KeePass import added and left out (spec §8.2.1).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -365,8 +377,12 @@ pub struct NewVault {
 
 #[derive(uniffi::Object)]
 pub struct Vault {
+    /// The folder, with this device's copy attached once the vault ID is known.
+    mirrored: Arc<MirroredStore<Arc<dyn RemoteStore>>>,
+    /// `mirrored`, as the session and unlock take it.
     store: Arc<dyn RemoteStore>,
     local: Arc<dyn LocalStore>,
+    state_dir: PathBuf,
     device_name: String,
     session: Mutex<Option<FfiSession>>,
     /// Mirrors whether `session` is set, readable without waiting for a call that
@@ -459,9 +475,12 @@ impl Vault {
             name: device_name.clone(),
         }
         .validate("device name")?;
+        let mirrored = Arc::new(MirroredStore::new(store));
         Ok(Arc::new(Self {
-            store,
-            local: Arc::new(FsLocalStore::new(state_dir)),
+            store: Arc::clone(&mirrored) as Arc<dyn RemoteStore>,
+            mirrored,
+            local: Arc::new(FsLocalStore::new(&state_dir)),
+            state_dir: PathBuf::from(state_dir),
             device_name,
             session: Mutex::new(None),
             unlocked: AtomicBool::new(false),
@@ -493,13 +512,15 @@ impl Vault {
 
     fn unlock_with(&self, credential: Credential<'_>) -> Result<SyncSummary> {
         let unlocked = unlock(&*self.store, &*self.local, credential)?;
+        self.mirrored
+            .attach(Arc::new(Mirror::new(&self.state_dir, &unlocked.vault_id)));
         let mut session = SessionOf::new(
             Arc::clone(&self.store),
             Arc::clone(&self.local),
             unlocked,
             &self.device_name,
         )?;
-        let summary = sync_and_maintain(&mut session)?;
+        let summary = sync_and_maintain(&mut session, &self.mirrored, false)?;
         for protector_id in std::mem::take(&mut *lock(&self.invalidated)) {
             session.remove_local_slots(protector_id)?;
         }
@@ -507,6 +528,32 @@ impl Vault {
         *self.slot() = Some(session);
         self.unlocked.store(true, Ordering::SeqCst);
         Ok(summary)
+    }
+
+    /// This device's copy of the vault: the attached one once unlocked; before, the
+    /// one for the folder's vault ID, or, when the folder lost even `strata-vault`,
+    /// the only copy on this device.
+    fn copy(&self) -> Result<Option<Arc<Mirror>>> {
+        if let Some(mirror) = self.mirrored.mirror() {
+            return Ok(Some(mirror));
+        }
+        let vault_id = match self.folder_vault_id() {
+            Ok(id) => id,
+            Err(_) => match Mirror::all(&self.state_dir).as_slice() {
+                [only] => *only,
+                _ => return Ok(None),
+            },
+        };
+        let mirror = Mirror::new(&self.state_dir, &vault_id);
+        Ok((!mirror.files()?.is_empty()).then(|| Arc::new(mirror)))
+    }
+
+    fn folder_vault_id(&self) -> Result<Id> {
+        let bytes = self
+            .mirrored
+            .folder()
+            .read("strata-vault", vault_info::LEN)?;
+        Ok(VaultInfo::parse(&bytes)?.vault_id)
     }
 
     fn rejoin_with(&self, credential: Credential<'_>) -> Result<()> {
@@ -578,7 +625,7 @@ impl Vault {
     /// Uploads pending changes and takes in everyone else's. Also snapshots when
     /// enough event files have piled up, and collects garbage past the grace period.
     pub fn sync(&self) -> Result<SyncSummary> {
-        self.with_session(sync_and_maintain)
+        self.with_session(|s| sync_and_maintain(s, &self.mirrored, false))
     }
 
     pub fn status(&self) -> VaultStatus {
@@ -834,6 +881,47 @@ impl Vault {
         })
     }
 
+    /// How many files this device's copy holds that the folder is missing: what
+    /// `restore_from_copy` would put back (spec §9.5). Works locked or unlocked.
+    pub fn restorable_files(&self) -> Result<u32> {
+        match self.copy()? {
+            Some(mirror) => Ok(count(
+                mirror.missing_from(self.mirrored.folder().as_ref())?.len(),
+            )),
+            None => Ok(0),
+        }
+    }
+
+    /// Puts back the files the folder is missing from this device's copy (spec §9.5).
+    /// Unlocked, it then checks the folder again from scratch: an alarm whose cause
+    /// the restore fixed is gone. Locked (an alarm at unlock keeps the vault locked),
+    /// unlock afterwards.
+    pub fn restore_from_copy(&self) -> Result<RestoreSummary> {
+        let mirror = self
+            .copy()?
+            .ok_or(not_found("copy of this vault on this device"))?;
+        let restored = count(mirror.restore(self.mirrored.folder().as_ref())?);
+        let sync = if self.is_locked() {
+            None
+        } else {
+            Some(self.with_session(|s| sync_and_maintain(s, &self.mirrored, true))?)
+        };
+        Ok(RestoreSummary { restored, sync })
+    }
+
+    /// Accepts the folder as it is: forgets this device's state for the vault and
+    /// locks, so the next unlock starts over as a new device, trusting the folder as
+    /// a fresh device would (spec §6.3, §9.5). Device unlock has to be set up again.
+    pub fn start_over_on_this_device(&self) -> Result<()> {
+        let vault_id = match self.slot().as_ref() {
+            Some(session) => session.vault_id(),
+            None => self.folder_vault_id()?,
+        };
+        self.lock();
+        self.local.forget(&vault_id)?;
+        Ok(())
+    }
+
     pub fn rename_device(&self, name: String) -> Result<()> {
         self.with_session(|s| Ok(s.write(vec![Edit::SetDeviceName { name }])?))
     }
@@ -987,8 +1075,19 @@ impl Vault {
 
 /// Syncs, then snapshots and collects garbage when the session may write.
 /// An alarm becomes part of the summary instead of an error.
-fn sync_and_maintain(session: &mut FfiSession) -> Result<SyncSummary> {
-    let report = match session.sync() {
+/// Syncs (or, after a repair, re-checks from scratch), then snapshots and collects
+/// garbage when due, and brings this device's copy up to date if the folder is healthy.
+fn sync_and_maintain(
+    session: &mut FfiSession,
+    mirrored: &MirroredStore<Arc<dyn RemoteStore>>,
+    recheck: bool,
+) -> Result<SyncSummary> {
+    let synced = if recheck {
+        session.recheck()
+    } else {
+        session.sync()
+    };
+    let report = match synced {
         Ok(report) => report,
         Err(CoreError::Alarm(kind)) => return Ok(SyncSummary::alarmed(kind)),
         Err(e) => return Err(e.into()),
@@ -1014,6 +1113,18 @@ fn sync_and_maintain(session: &mut FfiSession) -> Result<SyncSummary> {
         Err(CoreError::KeyRotated) => summary.key_rotated = true,
         Err(CoreError::Alarm(kind)) => summary.alarm = Some(kind),
         Err(e) => return Err(e.into()),
+    }
+    // Only a healthy folder updates the copy, so after an alarm it keeps the last
+    // good state (spec §9.5). A failed update is caught up by the next one.
+    if summary.alarm.is_none()
+        && !summary.key_rotated
+        && let Some(mirror) = mirrored.mirror()
+    {
+        let _ = mirror.update(
+            mirrored.folder(),
+            &session.vault_id(),
+            session.current_epoch(),
+        );
     }
     Ok(summary)
 }

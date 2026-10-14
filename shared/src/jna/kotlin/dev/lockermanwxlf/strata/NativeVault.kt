@@ -259,6 +259,14 @@ private class NativeVault(private val vault: Vault) : VaultHandle {
         }
     }
 
+    override suspend fun restorableFiles() = background { vault.restorableFiles().toInt() }
+
+    override suspend fun restoreFromCopy() = background {
+        vault.restoreFromCopy().let { RestoreSummary(it.restored.toInt(), it.sync?.common()) }
+    }
+
+    override suspend fun startOver() = background { vault.startOverOnThisDevice() }
+
     override suspend fun exportKdbx(password: ByteArray) = background {
         consuming(password) {
             vault.exportKdbx(password).let {
