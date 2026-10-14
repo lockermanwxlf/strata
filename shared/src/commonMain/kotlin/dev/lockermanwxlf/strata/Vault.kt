@@ -65,6 +65,15 @@ interface VaultHandle {
     /** Reverts every change flagged for review; returns how many edits that took. */
     suspend fun revertFlagged(): Int
 
+    /**
+     * Imports a KeePass file as new entries. [password] (UTF-8, may be empty) and
+     * [keyfile] are wiped; [file] is the encrypted file and isn't.
+     */
+    suspend fun importKdbx(file: ByteArray, password: ByteArray, keyfile: ByteArray?): ImportSummary
+
+    /** Every entry not in the trash, as a KeePass file under [password] (wiped). Not protected by Strata. */
+    suspend fun exportKdbx(password: ByteArray): ExportedFile
+
     /** The protector IDs with a local slot that can unlock this device. Works while locked. */
     suspend fun localUnlocks(): List<Int>
 
@@ -311,6 +320,21 @@ data class PurgeSummary(
 
 data class StrengthEstimate(val guessesLog10: Double, val warn: Boolean)
 
+/** What a KeePass import added and left out. */
+data class ImportSummary(
+    val entries: Int,
+    /** In the KeePass recycle bin. */
+    val recycled: Int,
+    /** Older versions of entries: Strata keeps no field history. */
+    val history: Int,
+    /** Fields, attachments and tags over the vault's limits. */
+    val skipped: Int,
+    val customIcons: Int,
+)
+
+/** A KeePass file made from the vault: encrypted, but not by Strata. */
+class ExportedFile(val bytes: ByteArray, val entries: Int, val conflicts: Int, val skipped: Int)
+
 sealed class EntryEdit {
     /** Sets a field, or removes it with a `null` value. The value is wiped once applied. */
     class SetField(
@@ -353,5 +377,8 @@ class StrataException(val reason: Reason, message: String, val alarm: Alarm? = n
         /** The device-unlock key is gone (say, fingerprints changed): use the password. */
         KEY_INVALIDATED,
         PROTECTOR_UNAVAILABLE,
+
+        /** A KeePass file that couldn't be opened or written. */
+        KEEPASS,
     }
 }

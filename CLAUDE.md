@@ -56,7 +56,7 @@ vault/
 - **Compaction:** snapshots keep the causal metadata of the ops they retain, so compaction is exact at any time. Event files a snapshot covers are deleted after a grace period. True purge rewrites history and rotates the epoch.
 - **Rollback/fork detection:** each client hash-chains its own events. Every device stores the last-seen seq per client, and a regression raises an alarm.
 - **Size padding:** pad payloads to size buckets.
-- **KDBX is import/export only.** Preserve unknown fields on round trips.
+- **KDBX is import/export only** (`kdbx/`, spec §8.2.1). Preserve unknown fields on round trips: KeePass data without a Strata field travels in `kdbx:` fields, which the entry screens hide. The `keepass` crate brings KDBX's own crypto (AES, Twofish, ChaCha20, Argon2d); it only ever touches the KeePass file, never the vault.
 
 ## Rules for working on crypto
 
@@ -76,6 +76,7 @@ vault/
 - `./gradlew :androidApp:installDebug`: build with cargo-ndk and install to a device or emulator
 - `./gradlew :desktopApp:packageDistributionForCurrentOS`: installer for this OS
 - `cd core && cargo test && cargo clippy`: Rust tests and lints
+- `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/kdbx-check.sh`: has KeePassXC open Strata's KeePass export and checks what it sees (also in CI). The import fixtures come from `core/strata-core/tests/fixtures/kdbx/make.sh`, which uses KeePassXC too
 - `uv run core/tools/vectors/check.py`: recompute the test vectors with independent (non-Rust) implementations
 - `cd core && STRATA_WRITE_VECTORS=1 cargo test --test vectors`: regenerate vectors after a deliberate spec change; then run the check above
 - `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/run-wsl.sh 600`: fuzz every parser for 10 minutes in WSL, starting from `core/fuzz/seeds` (regenerate with `uv run core/tools/fuzz/make_seeds.py`). Fuzzing is Linux or CI only; see Gotchas

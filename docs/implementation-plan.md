@@ -532,9 +532,35 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 - Use the `keepass` crate.
   - **Field mapping:** KDBX "protected" maps to `secret`.
   - **Unknown fields** round-trip as `kdbx:` fields.
-  - **History:** imported as events.
+  - ~~**History:** imported as events.~~ Not imported, see below.
 - **Export** writes a KDBX file the user chooses, with a warning that it is not protected by Strata.
 - **Tests:** round-trip fixtures from KeePassXC files, checking that unknown fields survive.
+
+**Status: done (2026-10-13).** The mapping is spec §8.2.1.
+
+- **Core (`kdbx/`, `keepass` 0.15):**
+  - Import reads KDBX 3.1 and 4.x with a password, a key file, or both, and turns each entry into ordinary edits, written as several events that stay within the event limits.
+  - Export writes KDBX 4.1 with Argon2id at the vault's password parameters.
+  - KeePass data Strata has no field for travels as `kdbx:` fields, so it survives a round trip: the UUID, icon, colors, override URL, times, auto-type, custom data, attachments, groups, and custom fields whose names clash with Strata's.
+  - Groups also become tags.
+  - FFI: `import_kdbx` and `export_kdbx`. KeePass errors arrive as `VaultError::Kdbx`.
+- **History isn't imported.** Strata drops a field's superseded values at the next snapshot (spec §9.3), so imported history would vanish anyway, after leaving old passwords in event files until garbage collection. The import report counts what was left out: history, the recycle bin, oversized values, custom icons.
+- **Imports add, never overwrite:** each entry gets a fresh ID, so importing twice gives duplicates rather than reverting later changes.
+- **UI:**
+  - Settings has Import from KeePass (file, password, optional key file) and Export to KeePass. Export warns that the file isn't protected by Strata and asks for its own password, entered twice, with the weak-password warning.
+  - KeePass data is hidden in the entry screens; a renamed `kdbx:field:` field shows as "name (from KeePass)".
+  - Neither file picker triggers the background lock.
+  - `AppHost` gained `openFile` and `saveFile`.
+- **Tests:**
+  - Fixtures written by KeePassXC itself (`core/strata-core/tests/fixtures/kdbx/make.sh`, from `source.xml`): every mapping rule, key files, wrong keys, truncated files, and batching.
+  - An FFI round trip (import, export, import into another vault, compare), and a conflict exported as two fields.
+  - The trash isn't exported.
+  - `core/tools/kdbx-check.sh` (WSL and CI) has KeePassXC open the export and checks what it sees.
+  - The controller test and screenshots cover the UI.
+- **Left for Phase 13:**
+  - A KDBX file sets its own key-derivation cost. A hostile file asking for gigabytes of Argon2 memory could crash the import, though only a file the user picked themselves.
+  - Capping it needs a look at the header before the `keepass` crate parses it.
+  - The `keepass` parser isn't fuzzed here, since each run pays for the key derivation.
 
 ### Phase 13: Hardening and review (M)
 

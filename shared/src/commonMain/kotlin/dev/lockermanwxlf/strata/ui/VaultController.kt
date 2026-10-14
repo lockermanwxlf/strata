@@ -7,6 +7,8 @@ import dev.lockermanwxlf.strata.AppHost
 import dev.lockermanwxlf.strata.DeviceProtector
 import dev.lockermanwxlf.strata.EntryEdit
 import dev.lockermanwxlf.strata.EntrySummary
+import dev.lockermanwxlf.strata.ImportSummary
+import dev.lockermanwxlf.strata.PickedFile
 import dev.lockermanwxlf.strata.StrataCore
 import dev.lockermanwxlf.strata.StrataException
 import dev.lockermanwxlf.strata.SyncSummary
@@ -16,6 +18,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -46,6 +49,8 @@ sealed interface Screen {
     data object ChangePassword : Screen
     data object Devices : Screen
     data object Review : Screen
+    data object ImportKeePass : Screen
+    data object ExportKeePass : Screen
 }
 
 /**
@@ -103,6 +108,9 @@ class VaultController(
     private var lastInput = TimeSource.Monotonic.markNow()
     private var clipboardJob: Job? = null
     private var backgroundJob: Job? = null
+
+    /** A system file picker is open: on Android it sends the app to the background. */
+    private var inPicker = false
 
     val unlocked: Boolean get() = status?.locked == false
 
@@ -279,7 +287,8 @@ class VaultController(
     }
 
     fun backgrounded() {
-        if (!unlocked) return
+        // The idle timeout still applies while a picker is open.
+        if (!unlocked || inPicker) return
         // Sends any change still waiting to reach the folder before the vault locks.
         syncQuietly()
         backgroundJob?.cancel()
@@ -407,6 +416,62 @@ class VaultController(
         message = if (n == 0) "Nothing to revert." else "Reverted $n change${if (n == 1) "" else "s"}."
     }
 
+    // ---- KeePass ---------------------------------------------------------------------
+
+    /** Asks for a file through the platform's picker. A file it can't read is a message, not a crash. */
+    suspend fun pickFile(): PickedFile? = try {
+        picking { host.openFile() }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        message = e.message ?: "Can't read that file."
+        null
+    }
+
+    /**
+     * Imports a KeePass file as new entries. [password] and the key file's bytes are
+     * wiped. Then reports what was added and what was left out.
+     */
+    fun importKdbx(file: PickedFile, password: ByteArray, keyfile: PickedFile?) = perform {
+        val v = vault ?: return@perform
+        val s = v.importKdbx(file.bytes, password, keyfile?.bytes)
+        refresh()
+        back()
+        message = importMessage(s)
+    }
+
+    /** Exports to a KeePass file under [password] (wiped), saved where the user picks. */
+    fun exportKdbx(password: ByteArray) = perform {
+        val v = vault ?: return@perform
+        val exported = v.exportKdbx(password)
+        val saved = try {
+            picking { host.saveFile("Strata export.kdbx", exported.bytes) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw StrataException(StrataException.Reason.IO, "Can't save the file: ${e.message}")
+        }
+        if (!saved) return@perform
+        back()
+        message = buildString {
+            append("Exported ${count(exported.entries, "entry", "entries")}.")
+            if (exported.conflicts > 0) {
+                append(" ${count(exported.conflicts, "field")} in conflict became several fields.")
+            }
+            if (exported.skipped > 0) append(" ${count(exported.skipped, "value")} KeePass can't hold were left out.")
+            append(" Delete the file when you no longer need it.")
+        }
+    }
+
+    private suspend fun <T> picking(block: suspend () -> T): T {
+        inPicker = true
+        try {
+            return block()
+        } finally {
+            inPicker = false
+        }
+    }
+
     fun rejoin(password: ByteArray) = perform {
         vault?.rejoinPassword(password)
         refresh()
@@ -444,4 +509,18 @@ class VaultController(
         message = e.message
         null
     }
+}
+
+private fun count(n: Int, one: String, many: String = one + "s") = "$n ${if (n == 1) one else many}"
+
+/** What a KeePass import did, for the user. */
+internal fun importMessage(s: ImportSummary): String = buildString {
+    append("Imported ${count(s.entries, "entry", "entries")}.")
+    val left = listOfNotNull(
+        "${count(s.history, "older version")} (Strata keeps no history)".takeIf { s.history > 0 },
+        "${count(s.recycled, "entry", "entries")} in the recycle bin".takeIf { s.recycled > 0 },
+        "${count(s.skipped, "value")} over the size limits".takeIf { s.skipped > 0 },
+        "${count(s.customIcons, "custom icon")}".takeIf { s.customIcons > 0 },
+    )
+    if (left.isNotEmpty()) append(" Left out: ${left.joinToString(", ")}.")
 }

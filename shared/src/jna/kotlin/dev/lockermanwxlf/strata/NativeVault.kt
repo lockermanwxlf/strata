@@ -242,6 +242,31 @@ private class NativeVault(private val vault: Vault) : VaultHandle {
 
     override suspend fun revertFlagged() = background { vault.revertFlagged().toInt() }
 
+    override suspend fun importKdbx(file: ByteArray, password: ByteArray, keyfile: ByteArray?) = background {
+        try {
+            vault.importKdbx(file, password, keyfile).let {
+                ImportSummary(
+                    entries = it.entries.toInt(),
+                    recycled = it.recycled.toInt(),
+                    history = it.history.toInt(),
+                    skipped = it.skipped.toInt(),
+                    customIcons = it.customIcons.toInt(),
+                )
+            }
+        } finally {
+            password.wipe()
+            keyfile?.wipe()
+        }
+    }
+
+    override suspend fun exportKdbx(password: ByteArray) = background {
+        consuming(password) {
+            vault.exportKdbx(password).let {
+                ExportedFile(it.bytes, it.entries.toInt(), it.conflicts.toInt(), it.skipped.toInt())
+            }
+        }
+    }
+
     override suspend fun localUnlocks() = background { vault.localUnlocks().map { it.toInt() and 0xff } }
 
     override suspend fun unlockLocal(protector: DeviceProtector, pin: ByteArray?) = backgroundSuspend {
@@ -314,6 +339,7 @@ private fun VaultException.common(): StrataException {
             "Device unlock stopped working (for example, fingerprints changed). Unlock with the password.",
         )
         is VaultException.ProtectorUnavailable -> StrataException(Reason.PROTECTOR_UNAVAILABLE, "device unlock unavailable: $detail")
+        is VaultException.Kdbx -> StrataException(Reason.KEEPASS, detail)
     }
 }
 

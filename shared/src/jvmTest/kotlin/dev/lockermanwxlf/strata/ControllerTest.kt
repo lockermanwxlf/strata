@@ -37,6 +37,16 @@ internal class FakeHost(root: Path) : AppHost {
 
     override suspend fun isVault(folder: String) = File(folder, "strata-vault").isFile
 
+    var nextFile: PickedFile? = null
+    val saved = mutableListOf<Pair<String, ByteArray>>()
+
+    override suspend fun openFile() = nextFile
+
+    override suspend fun saveFile(name: String, bytes: ByteArray): Boolean {
+        saved += name to bytes
+        return true
+    }
+
     override val deviceProtector: DeviceProtector? = null
 
     override val clipboard = object : SecretClipboard {
@@ -187,6 +197,33 @@ class ControllerTest {
         assertTrue(!c.unlocked)
         c.unlock(pw("a new password")).join()
         assertTrue(c.unlocked)
+    }
+
+    @Test
+    fun keepassImportAndExport() = runBlocking<Unit> {
+        val c = created()
+        val fixture = File("../core/strata-core/tests/fixtures/kdbx/keepassxc.kdbx").readBytes()
+        c.open(Screen.ImportKeePass)
+        val keyfileBytes = byteArrayOf(1, 2, 3)
+        c.importKdbx(PickedFile("keepassxc.kdbx", fixture), pw("fixture-password"), PickedFile("k", keyfileBytes)).join()
+        // The fixture has no key file, so the extra one makes the key wrong, and is wiped.
+        assertTrue(keyfileBytes.all { it == 0.toByte() })
+        assertEquals(Screen.ImportKeePass, c.screen)
+        assertNotNull(c.message)
+
+        c.importKdbx(PickedFile("keepassxc.kdbx", fixture), pw("fixture-password"), null).join()
+        assertEquals(listOf("Bank", "Mail", "Visa"), c.visibleEntries.map { it.title })
+        assertEquals(Screen.Entries, c.screen)
+        val message = assertNotNull(c.message)
+        assertTrue(message.startsWith("Imported 3 entries."), message)
+        assertTrue("2 older versions" in message, message)
+
+        c.exportKdbx(pw("export password")).join()
+        val (name, bytes) = host.saved.single()
+        assertEquals("Strata export.kdbx", name)
+        // The KDBX signature.
+        assertEquals(listOf(0x03, 0xD9, 0xA2, 0x9A), bytes.take(4).map { it.toInt() and 0xff })
+        assertTrue(assertNotNull(c.message).startsWith("Exported 3 entries."))
     }
 
     @Test

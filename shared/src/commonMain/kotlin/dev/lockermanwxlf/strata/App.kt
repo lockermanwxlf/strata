@@ -30,6 +30,8 @@ import dev.lockermanwxlf.strata.ui.DetailScreen
 import dev.lockermanwxlf.strata.ui.DevicesScreen
 import dev.lockermanwxlf.strata.ui.EditScreen
 import dev.lockermanwxlf.strata.ui.EntriesScreen
+import dev.lockermanwxlf.strata.ui.ExportKeePassScreen
+import dev.lockermanwxlf.strata.ui.ImportKeePassScreen
 import dev.lockermanwxlf.strata.ui.RecoveryWordsScreen
 import dev.lockermanwxlf.strata.ui.ResolveScreen
 import dev.lockermanwxlf.strata.ui.ReviewScreen
@@ -99,6 +101,8 @@ private fun ScreenFor(c: VaultController) {
         Screen.ChangePassword -> ChangePasswordScreen(c)
         Screen.Devices -> DevicesScreen(c)
         Screen.Review -> ReviewScreen(c)
+        Screen.ImportKeePass -> ImportKeePassScreen(c)
+        Screen.ExportKeePass -> ExportKeePassScreen(c)
     }
 }
 

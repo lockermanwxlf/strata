@@ -410,6 +410,59 @@ Notes:
 - **KDBX round-trip data:** fields named `kdbx:<...>` hold KDBX data Strata doesn't interpret, as opaque bytes, so it survives export.
 - Field values are bytes (text values are UTF-8), so secrets can be zeroized.
 
+#### 8.2.1 KDBX import and export
+
+Strata reads KeePass files (KDBX 3.1 and 4.x) and writes KDBX 4.1. Import maps each entry as follows; export maps back.
+
+| KDBX | Strata | `secret` |
+|---|---|---|
+| `Title`, `UserName`, `URL`, `Notes` | `title`, `username`, `url`, `notes` | the KDBX "protected" flag |
+| `Password` | `password` | always |
+| `otp` (KeePassXC's TOTP field) | `otp` | always |
+| any other string field `N` | `N`, or `kdbx:field:N` when `N` is a well-known name or starts with `kdbx:` | the KDBX "protected" flag |
+| attachment `N` | `kdbx:attachment:N`, the raw bytes | always |
+| containing group | `kdbx:group`: the group names below the root, joined with `/`; also added as a tag | no |
+| tags | tags | |
+| everything else the reader keeps (below) | `kdbx:entry` | always: override URLs and auto-type sequences can hold credentials |
+
+- Names are NFC-normalized. Empty values are skipped. A field, attachment or tag that breaks the limits of §8.2 (a name outside 1 to 128 bytes, a value over 64 KiB) is left out and counted in the import report.
+- **Not imported**, and counted in the report: entry history, entries in the recycle bin, and database-level data (custom icons, database metadata). Strata keeps no field history: a field's superseded values are dropped at the next snapshot (§9.3), so imported history would only leave old passwords in event files until garbage collection.
+- Imported entries get fresh random IDs. Importing a file twice creates duplicates rather than overwriting what was changed since.
+- Import writes ordinary events, in batches that stay within the event limits. Each batch is its own event, so an import that fails part way has added the batches before the failure, and the error says so.
+
+`kdbx:entry` holds a CBOR map. Readers ignore unknown keys, and export uses defaults when the field is missing or malformed:
+
+```
+KdbxEntry = {
+  ? 1: bstr .size 16,     ; the KDBX entry UUID
+  ? 2: uint,              ; built-in icon index
+  ? 3: tstr,              ; foreground color, "#RRGGBB"
+  ? 4: tstr,              ; background color, "#RRGGBB"
+  ? 5: tstr,              ; override URL
+  ? 6: bool,              ; password quality check (written only when false)
+  ? 7: int,               ; creation time, Unix seconds
+  ? 8: int,               ; expiry time, Unix seconds
+  ? 9: bool,              ; expires
+  ? 10: AutoType,
+  ? 11: [* [tstr, tstr]], ; custom data with string values: key, value
+}
+AutoType = {
+  1: bool,                ; enabled
+  ? 2: tstr,              ; default sequence
+  ? 3: bool,              ; obfuscate by using the clipboard
+  ? 4: [* [tstr, tstr]],  ; window associations: window, sequence
+}
+```
+
+**Export** writes every entry that isn't in the trash:
+
+- The file is KDBX 4.1 with AES-256 and Argon2id at the §6.2 default parameters, under a password the user chooses for that file. It is not protected by Strata in any way, and the UI says so.
+- Groups are recreated from `kdbx:group`, and the tag equal to it is left out. A group name containing `/` comes back as nested groups.
+- Strata's standard fields take KeePass's standard names. A custom field whose name is already taken in the entry (say, a custom `Password` next to `password`) is written as `<name> (2)`, `<name> (3)` and so on.
+- The entry UUID comes from `kdbx:entry` when present and not already used, otherwise it is random. The last-modification time is the time of export.
+- Secret fields are protected. A field in conflict (§9.2) exports its first candidate (by dot) under its own name and the others as `<name> (conflict 2)`, `<name> (conflict 3)` and so on.
+- Values that aren't UTF-8, in fields KDBX stores as text, are left out and counted.
+
 ### 8.3 Hybrid logical clock
 
 An HLC value is 64 bits: the top 48 bits are Unix time in milliseconds and the low 16 bits are a counter (Kulkarni et al., 2014).

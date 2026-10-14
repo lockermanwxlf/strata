@@ -46,6 +46,20 @@ pub enum Edit {
     },
 }
 
+impl Edit {
+    /// The entry the edit touches, if it touches one.
+    pub fn entry_id(&self) -> Option<Id> {
+        match self {
+            Edit::SetField { entry_id, .. }
+            | Edit::DeleteEntry { entry_id }
+            | Edit::KeepEntry { entry_id }
+            | Edit::AddTag { entry_id, .. }
+            | Edit::RemoveTag { entry_id, .. } => Some(*entry_id),
+            Edit::RetireClient { .. } | Edit::SetDeviceName { .. } => None,
+        }
+    }
+}
+
 /// A fresh entry ID. An entry comes into existence with its first `SetField`.
 pub fn new_entry_id() -> Result<Id> {
     random_id()

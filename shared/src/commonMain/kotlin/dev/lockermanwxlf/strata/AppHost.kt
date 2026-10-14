@@ -32,6 +32,12 @@ interface AppHost {
     /** [folder] as the user should see it. */
     suspend fun describeFolder(folder: String): String = folder
 
+    /** Asks for a file to read (a KeePass file, a key file); `null` if the user cancelled. */
+    suspend fun openFile(): PickedFile?
+
+    /** Asks where to save [bytes], suggesting [name]; `false` if the user cancelled. */
+    suspend fun saveFile(name: String, bytes: ByteArray): Boolean
+
     /** Biometric or Windows Hello unlock on this device, or `null` if there is none. */
     val deviceProtector: DeviceProtector?
 
@@ -43,6 +49,9 @@ interface AppHost {
      */
     fun setSecureScreen(secure: Boolean)
 }
+
+/** A file the user picked: its name, for display, and its contents. */
+class PickedFile(val name: String, val bytes: ByteArray)
 
 /**
  * The clipboard, for secrets. This is one of the two places a secret becomes a

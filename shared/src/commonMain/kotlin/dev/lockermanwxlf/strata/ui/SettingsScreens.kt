@@ -78,6 +78,12 @@ fun SettingsScreen(c: VaultController) {
         HorizontalDivider()
         SectionTitle("Vault")
         OutlinedButton(onClick = { c.open(Screen.Trash) }, modifier = Modifier.fillMaxWidth()) { Text("Trash") }
+        OutlinedButton(onClick = { c.open(Screen.ImportKeePass) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Import from KeePass")
+        }
+        OutlinedButton(onClick = { c.open(Screen.ExportKeePass) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Export to KeePass")
+        }
         OutlinedButton(onClick = { c.switchVault() }, modifier = Modifier.fillMaxWidth()) { Text("Open a different vault") }
         Hint(
             "Locks after ${c.idleTimeout.inWholeMinutes} minutes without input. " +

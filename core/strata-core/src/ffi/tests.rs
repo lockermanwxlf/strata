@@ -489,3 +489,205 @@ fn a_platform_folder_holds_the_same_vault_as_a_directory() {
     phone.unlock_password(PASSWORD.to_vec()).unwrap();
     assert_eq!(phone.reveal(id.clone(), "user".into()).unwrap(), b"me");
 }
+
+const KDBX: &[u8] = include_bytes!("../../tests/fixtures/kdbx/keepassxc.kdbx");
+
+/// An entry's fields as text, secret ones revealed, by title.
+fn contents(vault: &Vault) -> std::collections::BTreeMap<String, Vec<(String, String, bool)>> {
+    vault
+        .entries()
+        .unwrap()
+        .into_iter()
+        .map(|summary| {
+            let detail = vault.entry(summary.id.clone()).unwrap();
+            let mut fields: Vec<(String, String, bool)> = detail
+                .fields
+                .into_iter()
+                .filter(|f| f.name != crate::kdbx::EXTRAS_FIELD)
+                .map(|f| {
+                    let value = match f.value {
+                        Some(v) => v,
+                        None => String::from_utf8(
+                            vault.reveal(summary.id.clone(), f.name.clone()).unwrap(),
+                        )
+                        .unwrap(),
+                    };
+                    (f.name, value, f.secret)
+                })
+                .collect();
+            fields.sort();
+            (summary.title.unwrap_or_default(), fields)
+        })
+        .collect()
+}
+
+#[test]
+fn keepass_import_export_and_back_keeps_everything() {
+    let dirs = Dirs::new();
+    let vault = dirs.create().vault;
+    let summary = vault
+        .import_kdbx(KDBX.to_vec(), b"fixture-password".to_vec(), None)
+        .unwrap();
+    assert_eq!(
+        summary,
+        ImportSummary {
+            entries: 3,
+            recycled: 1,
+            history: 2,
+            skipped: 1,
+            custom_icons: 0,
+        }
+    );
+    let exported = vault.export_kdbx(b"export password".to_vec()).unwrap();
+    assert_eq!(
+        (exported.entries, exported.conflicts, exported.skipped),
+        (3, 0, 0)
+    );
+    // For an independent check with KeePassXC (core/tools/kdbx-check.sh).
+    if let Ok(path) = std::env::var("STRATA_KDBX_EXPORT") {
+        std::fs::write(path, &exported.bytes).unwrap();
+    }
+
+    // What KeePass sees.
+    let db = crate::kdbx::open_file(&exported.bytes, b"export password", None).unwrap();
+    let bank = db
+        .iter_all_entries()
+        .find(|e| e.get_title() == Some("Bank"))
+        .unwrap();
+    let mut uuid = [0; 16];
+    uuid[15] = 3;
+    assert_eq!(
+        bank.id().uuid().into_bytes(),
+        uuid,
+        "the KeePass UUID survives"
+    );
+    assert_eq!(bank.parent().name, "Finance");
+    assert_eq!(bank.parent().parent().unwrap().name, "Strata");
+    assert!(bank.fields["Password"].is_protected());
+    assert!(bank.fields["PIN"].is_protected());
+    assert!(!bank.fields["Account type"].is_protected());
+    assert_eq!(
+        bank.get("url"),
+        Some("a custom field that clashes with url")
+    );
+    let mut tags = bank.tags.clone();
+    tags.sort();
+    assert_eq!(
+        tags,
+        ["important", "money"],
+        "the group isn't repeated as a tag"
+    );
+    let (name, attachment) = bank.attachments_named().next().unwrap();
+    assert_eq!(name, "key.txt");
+    assert_eq!(attachment.data.get(), b"secret key file contents");
+    assert_eq!(bank.icon(), Some(&keepass::db::Icon::BuiltIn(66)));
+    assert_eq!(bank.override_url.as_deref(), Some("cmd://firefox {URL}"));
+    assert!(!bank.quality_check);
+    assert_eq!(bank.times.expires, Some(true));
+    assert_eq!(
+        bank.autotype.as_ref().unwrap().associations[0].window,
+        "*Bank*"
+    );
+    let visa = db
+        .iter_all_entries()
+        .find(|e| e.get_title() == Some("Visa"))
+        .unwrap();
+    assert_eq!(visa.parent().name, "Cards");
+
+    // And back into another vault: the same entries, fields and tags.
+    let other_dirs = Dirs::new();
+    let other = other_dirs.create().vault;
+    other
+        .import_kdbx(exported.bytes, b"export password".to_vec(), None)
+        .unwrap();
+    assert_eq!(contents(&other), contents(&vault));
+    let tags = |v: &Vault| {
+        let mut t: Vec<Vec<String>> = v.entries().unwrap().into_iter().map(|e| e.tags).collect();
+        t.sort();
+        t
+    };
+    assert_eq!(tags(&other), tags(&vault));
+}
+
+fn password_of(entry_id: &str, value: &[u8]) -> EntryEdit {
+    EntryEdit::SetField {
+        entry_id: entry_id.into(),
+        name: "password".into(),
+        value: Some(value.to_vec()),
+        secret: true,
+    }
+}
+
+#[test]
+fn keepass_export_spells_out_conflicts_and_skips_the_trash() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    let phone = dirs.open("phone");
+    let id = new_entry_id().unwrap();
+    let gone = new_entry_id().unwrap();
+    laptop
+        .apply(vec![
+            set(&id, "title", b"Mail"),
+            set(&gone, "title", b"Old"),
+        ])
+        .unwrap();
+    laptop
+        .apply(vec![EntryEdit::DeleteEntry {
+            entry_id: gone.clone(),
+        }])
+        .unwrap();
+    phone.sync().unwrap();
+    let password = |value: &[u8]| EntryEdit::SetField {
+        entry_id: id.clone(),
+        name: "password".into(),
+        value: Some(value.to_vec()),
+        secret: true,
+    };
+    laptop.apply(vec![password(b"from laptop")]).unwrap();
+    phone.apply(vec![password(b"from phone")]).unwrap();
+    laptop.sync().unwrap();
+
+    // A custom field that shares a name with one of KeePass's standard fields.
+    let clash = new_entry_id().unwrap();
+    laptop
+        .apply(vec![
+            set(&clash, "title", b"Clash"),
+            password_of(&clash, b"the real one"),
+            set(&clash, "Password", b"a custom field"),
+        ])
+        .unwrap();
+
+    let exported = laptop.export_kdbx(b"pw".to_vec()).unwrap();
+    assert_eq!((exported.entries, exported.conflicts), (2, 1));
+    let db = crate::kdbx::open_file(&exported.bytes, b"pw", None).unwrap();
+    let by_title = |t: &str| {
+        db.iter_all_entries()
+            .find(|e| e.get_title() == Some(t))
+            .unwrap()
+    };
+    let clashed = by_title("Clash");
+    assert_eq!(clashed.get("Password"), Some("the real one"));
+    assert_eq!(clashed.get("Password (2)"), Some("a custom field"));
+    let mail = by_title("Mail");
+    let mut both = vec![
+        mail.get("Password").unwrap(),
+        mail.get("Password (conflict 2)").unwrap(),
+    ];
+    both.sort();
+    assert_eq!(both, ["from laptop", "from phone"]);
+    assert!(mail.fields["Password (conflict 2)"].is_protected());
+
+    assert!(matches!(
+        laptop.export_kdbx(Vec::new()),
+        Err(VaultError::Kdbx { .. })
+    ));
+    assert!(matches!(
+        laptop.import_kdbx(KDBX.to_vec(), b"wrong".to_vec(), None),
+        Err(VaultError::Kdbx { .. })
+    ));
+    laptop.lock();
+    assert!(matches!(
+        laptop.import_kdbx(KDBX.to_vec(), b"fixture-password".to_vec(), None),
+        Err(VaultError::Locked)
+    ));
+}

@@ -20,6 +20,7 @@ use crate::crypto::{SecretBytes, SecretKey, generate, random_id};
 use crate::error::{AlarmKind, CoreError};
 use crate::format::Id;
 use crate::format::body::Op;
+use crate::kdbx::{self, KdbxError};
 use crate::keys::create::create_vault as create_vault_files;
 use crate::keys::strength;
 use crate::keys::unlock::{Credential, local_slots, unlock};
@@ -74,6 +75,20 @@ pub enum VaultError {
     KeyInvalidated,
     #[error("device unlock unavailable: {detail}")]
     ProtectorUnavailable { detail: String },
+    /// A KeePass file that couldn't be opened or written (spec §8.2.1).
+    #[error("{detail}")]
+    Kdbx { detail: String },
+}
+
+impl From<KdbxError> for VaultError {
+    fn from(e: KdbxError) -> Self {
+        match e {
+            KdbxError::Core(e) => e.into(),
+            e => VaultError::Kdbx {
+                detail: e.to_string(),
+            },
+        }
+    }
 }
 
 impl From<ProtectorError> for VaultError {
@@ -118,6 +133,31 @@ impl From<CoreError> for VaultError {
 }
 
 type Result<T, E = VaultError> = std::result::Result<T, E>;
+
+/// What a KeePass import added and left out (spec §8.2.1).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ImportSummary {
+    pub entries: u32,
+    /// Entries in the KeePass recycle bin, not imported.
+    pub recycled: u32,
+    /// Older versions of entries, not imported: Strata keeps no field history.
+    pub history: u32,
+    /// Fields, attachments and tags over the vault's limits.
+    pub skipped: u32,
+    /// Entries whose custom icon wasn't kept.
+    pub custom_icons: u32,
+}
+
+/// A KeePass file made from the vault, for the user to save.
+#[derive(uniffi::Record)]
+pub struct ExportedFile {
+    pub bytes: Vec<u8>,
+    pub entries: u32,
+    /// Fields in conflict, written as several fields.
+    pub conflicts: u32,
+    /// Values KeePass can't hold as they are, left out.
+    pub skipped: u32,
+}
 
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct SyncSummary {
@@ -729,6 +769,68 @@ impl Vault {
                     suspect: suspects.contains(id),
                 })
                 .collect())
+        })
+    }
+
+    /// Imports a KeePass file, opened with its password and optional key file. The
+    /// entries are added as new ones; nothing in the vault is replaced.
+    pub fn import_kdbx(
+        &self,
+        file: Vec<u8>,
+        password: Vec<u8>,
+        keyfile: Option<Vec<u8>>,
+    ) -> Result<ImportSummary> {
+        let password = Zeroizing::new(password);
+        let keyfile = keyfile.map(Zeroizing::new);
+        if self.is_locked() {
+            return Err(VaultError::Locked);
+        }
+        // The KeePass key derivation runs before the session is taken.
+        let imported = kdbx::import(&file, &password, keyfile.as_ref().map(|k| k.as_slice()))?;
+        self.with_session(|s| {
+            // Each batch is its own event. If one fails after others were written,
+            // say so: importing the file again would add those entries twice.
+            let mut added = std::collections::BTreeSet::new();
+            for batch in imported.batches {
+                let ids: Vec<Id> = batch.iter().filter_map(Edit::entry_id).collect();
+                if let Err(e) = s.write(batch) {
+                    if added.is_empty() {
+                        return Err(e.into());
+                    }
+                    return Err(VaultError::Kdbx {
+                        detail: format!(
+                            "the import stopped part way ({e}); {} entries were added, so importing \
+                             the file again would add those twice",
+                            added.len()
+                        ),
+                    });
+                }
+                added.extend(ids);
+            }
+            Ok(())
+        })?;
+        let r = imported.report;
+        Ok(ImportSummary {
+            entries: r.entries,
+            recycled: r.recycled,
+            history: r.history,
+            skipped: r.skipped,
+            custom_icons: r.custom_icons,
+        })
+    }
+
+    /// Every entry not in the trash, as a KeePass file under `password`. The file is
+    /// not protected by Strata.
+    pub fn export_kdbx(&self, password: Vec<u8>) -> Result<ExportedFile> {
+        let password = Zeroizing::new(password);
+        self.with_session(|s| {
+            let (bytes, r) = kdbx::export(&s.view(), &password)?;
+            Ok(ExportedFile {
+                bytes,
+                entries: r.entries,
+                conflicts: r.conflicts,
+                skipped: r.skipped,
+            })
         })
     }
 

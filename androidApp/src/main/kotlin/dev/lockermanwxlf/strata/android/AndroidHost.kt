@@ -9,12 +9,15 @@ import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import dev.lockermanwxlf.strata.AppHost
 import dev.lockermanwxlf.strata.DeviceProtector
+import dev.lockermanwxlf.strata.PickedFile
 import dev.lockermanwxlf.strata.deviceProtector
 import dev.lockermanwxlf.strata.SecretClipboard
 import dev.lockermanwxlf.strata.StrataException
@@ -52,29 +55,43 @@ class AndroidHost(private val activity: ComponentActivity) : AppHost {
                 .forEach { runCatching { resolver.releasePersistableUriPermission(it.uri, READ_WRITE) } }
         }
 
-    private var picked: CompletableDeferred<Uri?>? = null
-
     // Registered while the activity is created, as the Activity Result API requires.
-    private val folderPicker = activity.registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) {
-        picked?.complete(it)
-    }
+    private val folderPicker = Picker(activity, ActivityResultContracts.OpenDocumentTree())
+    private val filePicker = Picker(activity, ActivityResultContracts.OpenDocument())
+    private val fileSaver = Picker(activity, ActivityResultContracts.CreateDocument("application/octet-stream"))
 
     /**
      * The system folder picker (Storage Access Framework). A folder on the device that
      * another app syncs (Syncthing and the like), or a cloud provider's folder.
      */
     override suspend fun chooseVaultFolder(forNewVault: Boolean): String? {
-        val result = CompletableDeferred<Uri?>()
-        picked?.cancel()
-        picked = result
-        folderPicker.launch(null)
-        val uri = result.await() ?: return null
+        val uri = folderPicker.pick(null) ?: return null
         try {
             resolver.takePersistableUriPermission(uri, READ_WRITE)
         } catch (e: SecurityException) {
             throw StrataException(StrataException.Reason.IO, "Strata can't keep access to that folder: ${e.message}")
         }
         return uri.toString()
+    }
+
+    override suspend fun openFile(): PickedFile? {
+        val uri = filePicker.pick(arrayOf("*/*")) ?: return null
+        return withContext(Dispatchers.IO) {
+            val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: throw StrataException(StrataException.Reason.IO, "Can't read that file.")
+            PickedFile(name ?: "the file", bytes)
+        }
+    }
+
+    override suspend fun saveFile(name: String, bytes: ByteArray): Boolean {
+        val uri = fileSaver.pick(name) ?: return false
+        withContext(Dispatchers.IO) {
+            resolver.openOutputStream(uri, "wt")?.use { it.write(bytes) }
+                ?: throw StrataException(StrataException.Reason.IO, "Can't write that file.")
+        }
+        return true
     }
 
     override suspend fun isVault(folder: String): Boolean = withContext(Dispatchers.IO) {
@@ -123,6 +140,20 @@ class AndroidHost(private val activity: ComponentActivity) : AppHost {
         } else {
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         }
+    }
+}
+
+/** One Activity Result contract, as a suspending call. A new pick cancels one still waiting. */
+private class Picker<I, O>(activity: ComponentActivity, contract: ActivityResultContract<I, O>) {
+    private var pending: CompletableDeferred<O>? = null
+    private val launcher = activity.registerForActivityResult(contract) { pending?.complete(it) }
+
+    suspend fun pick(input: I): O {
+        val result = CompletableDeferred<O>()
+        pending?.cancel()
+        pending = result
+        launcher.launch(input)
+        return result.await()
     }
 }
 

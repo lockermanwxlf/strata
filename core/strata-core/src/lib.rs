@@ -20,6 +20,7 @@ pub mod encoding;
 pub mod error;
 pub mod ffi;
 pub mod format;
+pub mod kdbx;
 pub mod keys;
 pub mod local;
 pub mod merge;

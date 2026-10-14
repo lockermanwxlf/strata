@@ -37,6 +37,12 @@ zxcvbn = { version = "3.1.1", default-features = false }
 # Entry and device IDs cross the FFI as hex strings.
 hex = "0.4.3"
 
+# KDBX import and export (KeePass files; spec §8.2). Its own crypto is KDBX's, never Strata's.
+keepass = { version = "0.15.2", features = ["save_kdbx4"] }
+# The types keepass uses for entry times and UUIDs.
+chrono = { version = "0.4.45", default-features = false }
+uuid = { version = "1.28.0", default-features = false }
+
 [dev-dependencies]
 hex = "0.4.3"
 proptest = "1.12.0"

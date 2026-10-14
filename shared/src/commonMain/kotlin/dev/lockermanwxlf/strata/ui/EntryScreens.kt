@@ -211,9 +211,9 @@ fun DetailScreen(c: VaultController, id: String) {
                 OutlinedButton(onClick = { c.delete(id) }) { Text("Delete") }
             }
         }
-        d.fields.sortedBy { order(it.name) }.forEach { field ->
+        d.fields.filterNot { isKeePassData(it.name) }.sortedBy { order(it.name) }.forEach { field ->
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Hint(field.name)
+                Hint(fieldLabel(field.name))
                 when {
                     field.conflictCandidates > 0 -> Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
@@ -250,6 +250,9 @@ fun DetailScreen(c: VaultController, id: String) {
             }
         }
         if (d.tags.isNotEmpty()) Hint(d.tags.joinToString("  ") { "#$it" })
+        if (d.fields.any { isKeePassData(it.name) }) {
+            Hint("Also keeps what KeePass had for this entry (attachments, icon, auto-type), for exporting back to KeePass.")
+        }
     }
     if (deleting) {
         ConfirmDialog(
@@ -264,6 +267,18 @@ fun DetailScreen(c: VaultController, id: String) {
         )
     }
 }
+
+/**
+ * KeePass data kept for export (spec §8.2.1): neither shown nor edited, so it survives.
+ * `kdbx:field:` fields are the user's own, renamed on import, and stay visible.
+ */
+internal fun isKeePassData(name: String) = name.startsWith("kdbx:") && !name.startsWith(KEEPASS_FIELD)
+
+/** A field's name as the user sees it. */
+internal fun fieldLabel(name: String) =
+    if (name.startsWith(KEEPASS_FIELD)) "${name.removePrefix(KEEPASS_FIELD)} (from KeePass)" else name
+
+private const val KEEPASS_FIELD = "kdbx:field:"
 
 /** Standard fields first, in their usual order, then the rest by name. */
 private fun order(name: String): String {
@@ -300,7 +315,7 @@ fun EditScreen(c: VaultController, id: String, isNew: Boolean) {
             val f = present.firstOrNull { it.name == name }
             drafts += FieldDraft(name, f?.secret ?: secret, f?.value, existed = f != null)
         }
-        present.filter { f -> STANDARD_FIELDS.none { it.first == f.name } }.forEach {
+        present.filter { f -> STANDARD_FIELDS.none { it.first == f.name } && !isKeePassData(f.name) }.forEach {
             drafts += FieldDraft(it.name, it.secret, it.value, existed = true)
         }
         originalTags = detail?.tags.orEmpty()
@@ -356,15 +371,15 @@ private fun FieldEditor(draft: FieldDraft) {
             when {
                 !draft.secret -> OutlinedTextField(
                     state = draft.state,
-                    label = { Text(draft.name) },
+                    label = { Text(fieldLabel(draft.name)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 !draft.replacing -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${draft.name}: unchanged", modifier = Modifier.weight(1f))
+                    Text("${fieldLabel(draft.name)}: unchanged", modifier = Modifier.weight(1f))
                     TextButton(onClick = { draft.replacing = true }) { Text("Change") }
                 }
                 else -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    PasswordField(draft.state, draft.name, Modifier.weight(1f))
+                    PasswordField(draft.state, fieldLabel(draft.name), Modifier.weight(1f))
                     TextButton(onClick = { draft.state.setAscii(StrataCore.generatePassword(20, symbols = true)) }) {
                         Text("Generate")
                     }

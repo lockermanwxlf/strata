@@ -2,6 +2,7 @@ package dev.lockermanwxlf.strata.desktop
 
 import dev.lockermanwxlf.strata.AppHost
 import dev.lockermanwxlf.strata.DeviceProtector
+import dev.lockermanwxlf.strata.PickedFile
 import dev.lockermanwxlf.strata.SecretClipboard
 import dev.lockermanwxlf.strata.StrataCore
 import java.awt.Toolkit
@@ -17,6 +18,7 @@ import java.io.File
 import java.net.InetAddress
 import java.util.Properties
 import javax.swing.JFileChooser
+import javax.swing.JOptionPane
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
@@ -59,6 +61,34 @@ class DesktopHost : AppHost {
     }
 
     override suspend fun isVault(folder: String): Boolean = File(folder, "strata-vault").isFile
+
+    override suspend fun openFile(): PickedFile? {
+        val chosen = withContext(Dispatchers.Swing) {
+            val chooser = JFileChooser().apply { dialogTitle = "Choose a file" }
+            if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile else null
+        } ?: return null
+        return withContext(Dispatchers.IO) { PickedFile(chosen.name, chosen.readBytes()) }
+    }
+
+    override suspend fun saveFile(name: String, bytes: ByteArray): Boolean {
+        val chosen = withContext(Dispatchers.Swing) {
+            val chooser = JFileChooser().apply {
+                dialogTitle = "Save the KeePass file"
+                selectedFile = File(name)
+            }
+            if (chooser.showSaveDialog(null) != JFileChooser.APPROVE_OPTION) return@withContext null
+            val target = chooser.selectedFile
+            val replace = !target.exists() || JOptionPane.showConfirmDialog(
+                null,
+                "${target.name} already exists. Replace it?",
+                "Replace file",
+                JOptionPane.YES_NO_OPTION,
+            ) == JOptionPane.YES_OPTION
+            target.takeIf { replace }
+        } ?: return false
+        withContext(Dispatchers.IO) { chosen.writeBytes(bytes) }
+        return true
+    }
 
     /** This computer's device unlock, if any; checked once, on first use. */
     override val deviceProtector: DeviceProtector? by lazy { StrataCore.desktopProtector() }

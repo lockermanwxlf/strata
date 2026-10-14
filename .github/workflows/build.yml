@@ -27,9 +27,10 @@ jobs:
         with:
           workspaces: core
       # Linux also gets a software TPM and a keyring daemon, so the Linux platform
-      # protectors are tested against real services (core/tools/linux-protectors.sh).
+      # protectors are tested against real services (core/tools/linux-protectors.sh),
+      # and KeePassXC, which checks the KeePass export (core/tools/kdbx-check.sh).
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config swtpm swtpm-tools gnome-keyring dbus-x11
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config swtpm swtpm-tools gnome-keyring dbus-x11 keepassxc
       - working-directory: core
         run: cargo fmt --check
       - working-directory: core
@@ -41,6 +42,10 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/core/target
         run: bash core/tools/linux-protectors.sh
+      - if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/core/target
+        run: bash core/tools/kdbx-check.sh
 
   deny:
     name: Rust dependency licenses and advisories

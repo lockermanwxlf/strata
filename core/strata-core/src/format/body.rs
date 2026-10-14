@@ -21,7 +21,10 @@ pub const MAX_FIELD_VALUE_LEN: usize = 64 * 1024;
 pub const MAX_NAME_LEN: usize = 128;
 
 /// Well-known fields that MUST be secret (spec §8.2).
-const ALWAYS_SECRET_FIELDS: [&str; 2] = ["password", "otp"];
+pub(crate) const ALWAYS_SECRET_FIELDS: [&str; 2] = ["password", "otp"];
+/// Field names with a meaning of their own (spec §8.2).
+pub(crate) const WELL_KNOWN_FIELDS: [&str; 6] =
+    ["title", "username", "password", "url", "notes", "otp"];
 
 /// Identifies one op: event `(client_id, seq)`, position `op_index` in its ops array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -233,7 +236,7 @@ impl Op {
 }
 
 /// Field names, tags and device names: 1..=128 bytes of NFC UTF-8 (spec §4).
-fn check_name(name: &str, what: &'static str) -> Result<()> {
+pub(crate) fn check_name(name: &str, what: &'static str) -> Result<()> {
     if name.is_empty() || name.len() > MAX_NAME_LEN {
         return Err(CoreError::rejected(what, "name length out of range"));
     }

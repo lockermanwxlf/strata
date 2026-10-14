@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- The source of the KDBX fixtures (make.sh). Every value here is test data. -->
+<KeePassFile>
+  <Meta>
+    <Generator>Strata fixtures</Generator>
+    <DatabaseName>Fixture</DatabaseName>
+    <RecycleBinEnabled>True</RecycleBinEnabled>
+    <RecycleBinUUID>AAAAAAAAAAAAAAAAAAAAzw==</RecycleBinUUID>
+    <Binaries>
+      <Binary ID="0" Compressed="False">c2VjcmV0IGtleSBmaWxlIGNvbnRlbnRz</Binary>
+    </Binaries>
+  </Meta>
+  <Root>
+    <Group>
+      <UUID>AAAAAAAAAAAAAAAAAAAAAA==</UUID>
+      <Name>Root</Name>
+      <Times>
+        <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+        <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+        <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+        <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+        <Expires>False</Expires>
+        <UsageCount>0</UsageCount>
+        <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+      </Times>
+      <IsExpanded>True</IsExpanded>
+      <Entry>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAg==</UUID>
+        <IconID>0</IconID>
+        <Times>
+          <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+          <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+          <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+          <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+          <Expires>False</Expires>
+          <UsageCount>0</UsageCount>
+          <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+        </Times>
+        <String><Key>Title</Key><Value>Mail</Value></String>
+        <String><Key>UserName</Key><Value>me@example.test</Value></String>
+        <String><Key>Password</Key><Value ProtectInMemory="True">mail-password</Value></String>
+        <String><Key>URL</Key><Value></Value></String>
+        <String><Key>Notes</Key><Value></Value></String>
+        <String><Key>otp</Key><Value ProtectInMemory="True">otpauth://totp/Mail?secret=JBSWY3DPEHPK3PXP</Value></String>
+        <String><Key>Huge</Key><Value>@BIG@</Value></String>
+      </Entry>
+      <Group>
+        <UUID>AAAAAAAAAAAAAAAAAAAAAQ==</UUID>
+        <Name>Finance</Name>
+        <Times>
+          <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+          <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+          <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+          <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+          <Expires>False</Expires>
+          <UsageCount>0</UsageCount>
+          <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+        </Times>
+        <IsExpanded>True</IsExpanded>
+        <Entry>
+          <UUID>AAAAAAAAAAAAAAAAAAAAAw==</UUID>
+          <IconID>66</IconID>
+          <ForegroundColor>#FF0000</ForegroundColor>
+          <BackgroundColor>#00FF00</BackgroundColor>
+          <OverrideURL>cmd://firefox {URL}</OverrideURL>
+          <QualityCheck>False</QualityCheck>
+          <Tags>money;important</Tags>
+          <Times>
+            <CreationTime>2020-01-01T00:00:00Z</CreationTime>
+            <LastModificationTime>2022-06-01T00:00:00Z</LastModificationTime>
+            <LastAccessTime>2022-06-01T00:00:00Z</LastAccessTime>
+            <ExpiryTime>2030-01-01T00:00:00Z</ExpiryTime>
+            <Expires>True</Expires>
+            <UsageCount>3</UsageCount>
+            <LocationChanged>2020-01-01T00:00:00Z</LocationChanged>
+          </Times>
+          <String><Key>Title</Key><Value>Bank</Value></String>
+          <String><Key>UserName</Key><Value>customer-42</Value></String>
+          <String><Key>Password</Key><Value ProtectInMemory="True">bank-password</Value></String>
+          <String><Key>URL</Key><Value>https://bank.example.test</Value></String>
+          <String><Key>Notes</Key><Value>Branch: Main St.</Value></String>
+          <String><Key>PIN</Key><Value ProtectInMemory="True">4711</Value></String>
+          <String><Key>Account type</Key><Value>checking</Value></String>
+          <String><Key>url</Key><Value>a custom field that clashes with url</Value></String>
+          <String><Key>Cafe&#x301;</Key><Value>a name that isn't NFC</Value></String>
+          <Binary><Key>key.txt</Key><Value Ref="0"/></Binary>
+          <AutoType>
+            <Enabled>True</Enabled>
+            <DataTransferObfuscation>1</DataTransferObfuscation>
+            <DefaultSequence>{USERNAME}{TAB}{PASSWORD}{ENTER}</DefaultSequence>
+            <Association><Window>*Bank*</Window><KeystrokeSequence>{PASSWORD}{ENTER}</KeystrokeSequence></Association>
+          </AutoType>
+          <CustomData>
+            <Item><Key>KPXC_DECRYPTION_TIME_PREFERENCE</Key><Value>100</Value></Item>
+          </CustomData>
+          <History>
+            <Entry>
+              <UUID>AAAAAAAAAAAAAAAAAAAAAw==</UUID>
+              <Times>
+                <CreationTime>2020-01-01T00:00:00Z</CreationTime>
+                <LastModificationTime>2020-01-01T00:00:00Z</LastModificationTime>
+                <LastAccessTime>2020-01-01T00:00:00Z</LastAccessTime>
+                <ExpiryTime>2020-01-01T00:00:00Z</ExpiryTime>
+                <Expires>False</Expires>
+                <UsageCount>0</UsageCount>
+                <LocationChanged>2020-01-01T00:00:00Z</LocationChanged>
+              </Times>
+              <String><Key>Title</Key><Value>Bank</Value></String>
+              <String><Key>Password</Key><Value ProtectInMemory="True">old-bank-password-1</Value></String>
+            </Entry>
+            <Entry>
+              <UUID>AAAAAAAAAAAAAAAAAAAAAw==</UUID>
+              <Times>
+                <CreationTime>2020-01-01T00:00:00Z</CreationTime>
+                <LastModificationTime>2021-01-01T00:00:00Z</LastModificationTime>
+                <LastAccessTime>2021-01-01T00:00:00Z</LastAccessTime>
+                <ExpiryTime>2021-01-01T00:00:00Z</ExpiryTime>
+                <Expires>False</Expires>
+                <UsageCount>0</UsageCount>
+                <LocationChanged>2020-01-01T00:00:00Z</LocationChanged>
+              </Times>
+              <String><Key>Title</Key><Value>Bank</Value></String>
+              <String><Key>Password</Key><Value ProtectInMemory="True">old-bank-password-2</Value></String>
+            </Entry>
+          </History>
+        </Entry>
+        <Group>
+          <UUID>AAAAAAAAAAAAAAAAAAAABA==</UUID>
+          <Name>Cards</Name>
+          <Times>
+            <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+            <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+            <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+            <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+            <Expires>False</Expires>
+            <UsageCount>0</UsageCount>
+            <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+          </Times>
+          <IsExpanded>True</IsExpanded>
+          <Entry>
+            <UUID>AAAAAAAAAAAAAAAAAAAABQ==</UUID>
+            <Times>
+              <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+              <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+              <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+              <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+              <Expires>False</Expires>
+              <UsageCount>0</UsageCount>
+              <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+            </Times>
+            <String><Key>Title</Key><Value>Visa</Value></String>
+            <String><Key>Password</Key><Value ProtectInMemory="True">1234</Value></String>
+          </Entry>
+        </Group>
+      </Group>
+      <Group>
+        <UUID>AAAAAAAAAAAAAAAAAAAAzw==</UUID>
+        <Name>Recycle Bin</Name>
+        <Times>
+          <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+          <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+          <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+          <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+          <Expires>False</Expires>
+          <UsageCount>0</UsageCount>
+          <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+        </Times>
+        <IsExpanded>True</IsExpanded>
+        <IconID>43</IconID>
+        <Entry>
+          <UUID>AAAAAAAAAAAAAAAAAAAABg==</UUID>
+          <Times>
+            <CreationTime>2021-02-03T04:05:06Z</CreationTime>
+            <LastModificationTime>2021-02-03T04:05:06Z</LastModificationTime>
+            <LastAccessTime>2021-02-03T04:05:06Z</LastAccessTime>
+            <ExpiryTime>2021-02-03T04:05:06Z</ExpiryTime>
+            <Expires>False</Expires>
+            <UsageCount>0</UsageCount>
+            <LocationChanged>2021-02-03T04:05:06Z</LocationChanged>
+          </Times>
+          <String><Key>Title</Key><Value>Deleted</Value></String>
+        </Entry>
+      </Group>
+    </Group>
+    <DeletedObjects/>
+  </Root>
+</KeePassFile>
