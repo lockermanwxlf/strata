@@ -4,14 +4,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use super::{SessionOf, Watermark};
+use super::{Existing, SessionOf, Watermark};
 use crate::crypto::kdf::{self, Argon2Params, EpochKeys};
 use crate::crypto::recovery::{self, RecoveryKeyPair};
 use crate::crypto::{SecretBytes, SecretKey, fill_random, random_id};
 use crate::error::{CoreError, Result};
 use crate::format::Id;
 use crate::format::body::{Dot, Op, VectorClock};
-use crate::format::epoch::{ChainWrap, NewEpoch};
+use crate::format::epoch::{self, ChainWrap, EpochRecord, NewEpoch};
 use crate::format::event::SealedEvent;
 use crate::format::names::FileName;
 use crate::format::slot::{self, SlotParams};
@@ -180,7 +180,26 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             creator: client,
         }
         .to_path();
-        self.store.create(&record_path, &record)?;
+        // A record this device wrote, whole, can't be in the way: after it, this
+        // device would have followed that rotation. A half-written one from a crash
+        // can, on storage without atomic renames, and is replaced.
+        let own_pk = self.device.public_key();
+        let existing = self.create_own(&record_path, &record, epoch::MAX_LEN, |there| {
+            if there == record.as_slice() {
+                Existing::Same
+            } else if EpochRecord::parse(there, &vault_id).is_ok_and(|r| r.signature_valid(&own_pk))
+            {
+                Existing::Other
+            } else {
+                Existing::Junk
+            }
+        })?;
+        if matches!(existing, Some(Existing::Other | Existing::Junk)) {
+            return Err(CoreError::rejected(
+                "epoch record",
+                "this device already wrote a different record for this epoch",
+            ));
+        }
 
         // Another device may have rotated to the same epoch moments ago (spec §7.2).
         // If its record wins, back out before anything depends on ours: nobody can

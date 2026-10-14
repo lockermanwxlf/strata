@@ -1542,3 +1542,136 @@ fn late_events_from_a_device_known_at_the_rotation_are_accepted_unflagged() {
     assert_eq!(field(&a, X, "title").as_deref(), Some("written offline"));
     assert_eq!(a.review(), Review::default());
 }
+
+/// How a crash during a write leaves the file, on storage without atomic renames.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Crash {
+    None,
+    /// The first half of the bytes made it.
+    Truncated,
+    /// The length was recorded but not the data, as FAT can leave it.
+    Zeroed,
+    /// The whole file made it, but the writer never learned.
+    AfterWrite,
+}
+
+/// A store that crashes the next writes under `prefix` in the way set.
+struct CrashingStore {
+    inner: MemoryStore,
+    crash: std::sync::Mutex<(Crash, &'static str)>,
+}
+
+impl CrashingStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            crash: std::sync::Mutex::new((Crash::None, "")),
+        }
+    }
+
+    fn crash(&self, how: Crash, prefix: &'static str) {
+        *self.crash.lock().unwrap() = (how, prefix);
+    }
+}
+
+impl RemoteStore for CrashingStore {
+    fn list(&self) -> Result<Vec<String>> {
+        self.inner.list()
+    }
+    fn read(&self, path: &str, max_len: usize) -> Result<Vec<u8>> {
+        self.inner.read(path, max_len)
+    }
+    fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        let (how, prefix) = *self.crash.lock().unwrap();
+        if how == Crash::None || !path.starts_with(prefix) {
+            return self.inner.create(path, bytes);
+        }
+        let left = match how {
+            Crash::Truncated => bytes[..bytes.len() / 2].to_vec(),
+            Crash::Zeroed => vec![0; bytes.len()],
+            _ => bytes.to_vec(),
+        };
+        self.inner.create(path, &left)?;
+        Err(std::io::Error::other("crashed").into())
+    }
+    fn delete(&self, path: &str) -> Result<()> {
+        self.inner.delete(path)
+    }
+}
+
+#[test]
+fn a_half_written_event_from_a_crash_is_replaced_not_a_fork() {
+    for how in [Crash::Truncated, Crash::Zeroed] {
+        let store = CrashingStore::new();
+        let a_local = MemoryLocalStore::new();
+        create_vault(&store, &a_local, PASSWORD, "Laptop").unwrap();
+        let mut a = open(&store, &a_local, "Laptop");
+
+        store.crash(how, "events/");
+        assert!(a.write(vec![set(X, "title", "edit")]).is_err());
+        store.crash(Crash::None, "");
+        let report = a.sync().unwrap();
+        assert_eq!(report.uploaded, 1);
+        assert_eq!(a.alarm(), None);
+
+        let b_local = MemoryLocalStore::new();
+        let b = open(&store, &b_local, "Phone");
+        assert_eq!(field(&b, X, "title").as_deref(), Some("edit"));
+    }
+}
+
+#[test]
+fn an_event_published_before_a_crash_and_resealed_after_a_rotation_is_not_a_fork() {
+    let store = CrashingStore::new();
+    let a_local = MemoryLocalStore::new();
+    create_vault(&store, &a_local, PASSWORD, "Laptop").unwrap();
+    let mut a = open(&store, &a_local, "Laptop");
+
+    // The upload succeeds, but the device crashes before it learns: still pending.
+    store.crash(Crash::AfterWrite, "events/");
+    assert!(a.write(vec![set(X, "title", "edit")]).is_err());
+    store.crash(Crash::None, "");
+    // A key change re-seals the pending event under the new epoch before uploading.
+    a.change_password(b"a new password").unwrap();
+    a.sync().unwrap();
+    assert_eq!(a.alarm(), None);
+    assert!(a.state.record.pending.is_empty());
+    let b_local = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &b_local, Credential::Password(b"a new password")).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    b.sync().unwrap();
+    assert_eq!(field(&b, X, "title").as_deref(), Some("edit"));
+}
+
+#[test]
+fn a_half_written_epoch_record_doesnt_block_the_next_password_change() {
+    let store = CrashingStore::new();
+    let a_local = MemoryLocalStore::new();
+    create_vault(&store, &a_local, PASSWORD, "Laptop").unwrap();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    a.write(vec![set(X, "title", "before")]).unwrap();
+
+    store.crash(Crash::Truncated, "epochs/");
+    assert!(a.change_password(b"a new password").is_err());
+    store.crash(Crash::None, "");
+    // The half-written record and the slots written before it are in the folder.
+    a.change_password(b"a new password").unwrap();
+    a.write(vec![set(X, "title", "after")]).unwrap();
+
+    // A device that knew the vault before follows with the new password.
+    b.sync().unwrap();
+    assert!(b.key_rotated());
+    let unlocked = unlock(&store, &b_local, Credential::Password(b"a new password")).unwrap();
+    let mut b = Session::new(&store, &b_local, unlocked, "Phone").unwrap();
+    b.sync().unwrap();
+    assert_eq!(b.alarm(), None);
+    assert_eq!(field(&b, X, "title").as_deref(), Some("after"));
+    // And so does a new one.
+    let c_local = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &c_local, Credential::Password(b"a new password")).unwrap();
+    let mut c = Session::new(&store, &c_local, unlocked, "Tablet").unwrap();
+    c.sync().unwrap();
+    assert_eq!(field(&c, X, "title").as_deref(), Some("after"));
+}

@@ -619,10 +619,14 @@ The vault folder was the only place a vault's contents lived, so a sync tool tha
   - A vanished password slot.
   - Never overwriting, and the controller flow.
 
-**Next:**
+**Done (2026-10-14): crashes mid-write** on storage without atomic renames (FAT/exFAT, some network shares, some Android providers).
 
-1. A half-written file left by a crash on storage without atomic renames (FAT/exFAT, some network shares, some Android providers) makes the device's own retry look like a fork. The retry should recognize its own unfinished file.
-2. Optionally: notes keep both values on concurrent edits, like secret fields.
+- **The device's retry no longer sees a fork.** At names only this device writes (its events and epoch records), a file that doesn't verify is a leftover, and is replaced (`Session::create_own`). The same body under an older epoch counts as already sent. Before, this raised a false fork alarm.
+- **A half-written epoch record no longer makes every device read-only.** Writers decided that a newer epoch existed from file names alone; only records that parse count now, as at unlock.
+- Before, a crashed password change also failed on every retry, because the record's name was taken.
+- **Tests** crash writes three ways (truncated, zero-filled as FAT can leave them, and whole but unacknowledged), for events and for a password change.
+
+**Optional next:** notes keep both values on concurrent edits, like secret fields.
 
 ## 4. Order and parallelism
 

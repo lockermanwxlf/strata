@@ -35,6 +35,14 @@ pub enum Held {
     WaitingForDependencies,
 }
 
+/// What a file already at one of this device's own names is (see `create_own`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Existing {
+    Same,
+    Other,
+    Junk,
+}
+
 #[derive(Debug, Default)]
 pub struct SyncReport {
     pub applied: usize,
@@ -230,7 +238,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
         let mut report = SyncReport::default();
         let mut paths = self.store.list()?;
         self.refresh_epoch_files(&paths)?;
-        self.notice_newer_epoch(&paths);
+        self.notice_newer_epoch();
         report.key_rotated = self.rotated_away;
         self.event_files = paths.iter().filter(|p| p.starts_with("events/")).count();
         report.event_files = self.event_files;
@@ -326,13 +334,14 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
         Ok(())
     }
 
-    /// Sets `rotated_away` if the listing has an epoch record newer than this device's
+    /// Sets `rotated_away` if the folder has an epoch record newer than this device's
     /// key (spec §7.2).
-    fn notice_newer_epoch(&mut self, paths: &[String]) {
+    /// Counts only records that parse, as unlock does (`refresh_epoch_files` runs
+    /// first): a half-written record from a crashed rotation must not stop every
+    /// device from writing.
+    fn notice_newer_epoch(&mut self) {
         let current = self.keyring.current();
-        if paths.iter().any(|p| {
-            matches!(FileName::parse(p), Some(FileName::Epoch { epoch, .. }) if epoch > current)
-        }) {
+        if self.epoch_records().any(|r| r.epoch > current) {
             self.rotated_away = true;
         }
     }
@@ -344,7 +353,8 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     fn check_writable_now(&mut self) -> Result<()> {
         self.check_writable()?;
         let paths = self.store.list_dir("epochs")?;
-        self.notice_newer_epoch(&paths);
+        self.refresh_epoch_files(&paths)?;
+        self.notice_newer_epoch();
         self.check_writable()
     }
 
@@ -1032,16 +1042,85 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     fn upload(&mut self, bytes: &[u8]) -> Result<()> {
         let header = SealedEvent::parse(bytes, &self.vault_id)?.header;
         let path = header.file_name().to_path();
-        match self.store.create(&path, bytes) {
-            Ok(()) => Ok(()),
-            Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if self.store.read(&path, event::MAX_FILE_LEN)? == bytes {
-                    Ok(())
-                } else {
-                    Err(self.raise(AlarmKind::Fork))
-                }
+        let existing = self.create_own(&path, bytes, event::MAX_FILE_LEN, |there| {
+            self.judge_event(there, bytes)
+        })?;
+        match existing {
+            None | Some(Existing::Same) => Ok(()),
+            Some(Existing::Other | Existing::Junk) => Err(self.raise(AlarmKind::Fork)),
+        }
+    }
+
+    /// Creates a file only this device ever writes: one of its events or epoch
+    /// records. `None` once created. If the name is taken, `judge` says what's there:
+    /// - the same thing: a retry of a write that succeeded;
+    /// - something else this device signed: a fork, for the caller to handle;
+    /// - junk, which doesn't verify: what a write that crashed half way leaves on
+    ///   storage without atomic renames (spec §5). It is replaced: nobody else writes
+    ///   this name, and a file that fails verification is nobody's data.
+    pub(crate) fn create_own(
+        &self,
+        path: &str,
+        bytes: &[u8],
+        max_len: usize,
+        judge: impl Fn(&[u8]) -> Existing,
+    ) -> Result<Option<Existing>> {
+        let taken = |e: &CoreError| matches!(e, CoreError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists);
+        match self.store.create(path, bytes) {
+            Ok(()) => return Ok(None),
+            Err(e) if taken(&e) => {}
+            Err(e) => return Err(e),
+        }
+        let verdict = match self.store.read(path, max_len) {
+            Ok(there) => judge(&there),
+            // Too large to be anything this device wrote.
+            Err(CoreError::Rejected { .. }) => Existing::Junk,
+            Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Existing::Junk,
+            Err(e) => return Err(e),
+        };
+        if verdict != Existing::Junk {
+            return Ok(Some(verdict));
+        }
+        match self.store.delete(path) {
+            Err(CoreError::Io(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(CoreError::Io(e));
             }
+            _ => {}
+        }
+        match self.store.create(path, bytes) {
+            Ok(()) => Ok(None),
+            // Taken again at once: not a leftover, so not something to replace twice.
+            Err(e) if taken(&e) => Ok(Some(Existing::Junk)),
             Err(e) => Err(e),
+        }
+    }
+
+    /// What a file found at the name of `ours`, one of this device's events, is.
+    fn judge_event(&self, there: &[u8], ours: &[u8]) -> Existing {
+        if there == ours {
+            return Existing::Same;
+        }
+        let Ok(sealed) = SealedEvent::parse(there, &self.vault_id) else {
+            return Existing::Junk;
+        };
+        let Ok(mine) = SealedEvent::parse(ours, &self.vault_id) else {
+            return Existing::Other;
+        };
+        if sealed.header.file_name() != mine.header.file_name()
+            || !sealed.signature_valid(&self.device.public_key())
+        {
+            return Existing::Junk;
+        }
+        // Signed by this device: the same change, perhaps sealed under an older
+        // epoch before a crash, or a different one (a fork).
+        let body = |e: &SealedEvent<'_>| {
+            self.keyring
+                .keys(e.header.epoch)
+                .and_then(|k| e.open(&k.event).ok())
+        };
+        match (body(&sealed), body(&mine)) {
+            (Some(a), Some(b)) if a == b => Existing::Same,
+            _ => Existing::Other,
         }
     }
 

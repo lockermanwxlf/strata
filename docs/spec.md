@@ -110,6 +110,11 @@ There are two layers.
 
 - Clients only **create** files, never modify them. Deletions happen only in the cases listed: removing slots after rotation (§7), garbage collection (§10.3), and purge (§10.4).
 - Writers create each file under a temporary name beginning with `.` and then rename it into place. When the backend supports it, they use create-exclusive and never overwrite. If the target name already exists, the writer MUST NOT overwrite it and MUST raise a fork alarm (§9.4). A backend that can't refuse a taken name (one that picks another name, or keeps two files with the same name, as some Android storage providers do) is checked after the write instead: unless the writer's file ended up under exactly the target name and is the only file with it, the writer removes its file and treats the name as taken.
+- **Names only one device writes.** Its events (`<clientId>-<seq>`) and its epoch records (`<epoch>-<clientId>`) are written by no one else. On storage without atomic renames, a write that crashes half way leaves a partial file there, and the retry finds the name taken. The writer then reads what's there:
+  - A file that doesn't verify (it fails to parse, carries the wrong name, or isn't signed by this device) is a leftover. The writer deletes it and writes again: nobody else writes the name, and a file that fails verification is nobody's data.
+  - The same bytes, or for an event the same body sealed under an older epoch, mean an earlier attempt succeeded.
+  - Anything else is a fork.
+- **Readers** decide that a newer epoch exists only from epoch records that parse. A half-written record must not stop every device from writing.
 - Readers ignore names that don't exactly match the patterns above. That covers temporary files and the conflict copies that sync providers create.
 - The values inside a file MUST match its name: client ID, seq, epoch, slot ID or snapshot ID. A mismatch is rejected.
 
