@@ -6,7 +6,9 @@
 #   wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/run-wsl.sh 600
 #
 # Needs rustup (nightly) and cargo-fuzz inside WSL. Build output and the growing
-# corpora live in the WSL home directory, which is much faster than /mnt/d.
+# corpora live in the WSL home directory, which is much faster than /mnt/d. After a
+# long run, minimize the corpora into fuzz/corpus with tools/fuzz/minimize-wsl.sh
+# and commit them.
 set -u
 seconds="${1:-600}"
 source "$HOME/.cargo/env"
@@ -20,7 +22,10 @@ targets=$(cargo fuzz list)
 cargo fuzz build >/dev/null 2>&1 || { echo "cargo fuzz build failed"; exit 1; }
 for t in $targets; do
   mkdir -p "$corpus/$t"
-  (cargo fuzz run "$t" "$corpus/$t" "fuzz/seeds/$t" -- -max_total_time="$seconds" -print_final_stats=1 \
+  # Committed, minimized corpora (fuzz/corpus) seed each run along with fuzz/seeds.
+  extra=()
+  [ -d "fuzz/corpus/$t" ] && extra+=("fuzz/corpus/$t")
+  (cargo fuzz run "$t" "$corpus/$t" "${extra[@]}" "fuzz/seeds/$t" -- -max_total_time="$seconds" -print_final_stats=1 \
       > "$logs/$t.log" 2>&1; echo "exit=$?" >> "$logs/$t.log") &
 done
 wait

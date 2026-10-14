@@ -414,6 +414,8 @@ Notes:
 
 Strata reads KeePass files (KDBX 3.1 and 4.x) and writes KDBX 4.1. Import maps each entry as follows; export maps back.
 
+A KeePass file sets its own key-derivation cost, so before opening one Strata reads the unencrypted header and refuses a file that asks for more than: Argon2 memory 1 GiB, 10,000 Argon2 iterations, 2^35 for memory (bytes) times iterations, parallelism 64, or 2^32 AES-KDF rounds. Otherwise a hostile file could exhaust memory or run for hours. KeePass 1 files (`.kdb`) are refused. KDBX's own primitives (AES, Twofish, ChaCha20, Argon2d) touch only the KeePass file and never a vault key, so they aren't part of §3.
+
 | KDBX | Strata | `secret` |
 |---|---|---|
 | `Title`, `UserName`, `URL`, `Notes` | `title`, `username`, `url`, `notes` | the KDBX "protected" flag |

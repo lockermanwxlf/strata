@@ -36,8 +36,15 @@ def write(target, name, data):
     (d / name).write_bytes(data)
 
 
+# The targets whose seeds come from here. The local_state and kdbx seeds come from
+# Rust tests instead (STRATA_WRITE_SEEDS=1 cargo test fuzz_seeds), since local state
+# has no test vectors.
+TARGETS = ["envelopes", "bodies", "padding", "names", "reader"]
+
+
 def main():
-    shutil.rmtree(OUT, ignore_errors=True)
+    for target in TARGETS:
+        shutil.rmtree(OUT / target, ignore_errors=True)
     v = check.load("files.json")
 
     # envelopes: the first byte picks the parser (see fuzz_targets/envelopes.rs).

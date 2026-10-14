@@ -12,6 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 use super::extras::{AutoType, Extras};
 use super::{
     ATTACHMENT_PREFIX, EXTRAS_FIELD, FIELD_PREFIX, GROUP_FIELD, KdbxError, PREFIX, STANDARD_FIELDS,
+    header,
 };
 use crate::crypto::SecretBytes;
 use crate::error::Result;
@@ -63,6 +64,7 @@ pub fn open_file(
     password: &[u8],
     keyfile: Option<&[u8]>,
 ) -> std::result::Result<Database, KdbxError> {
+    header::check(file)?;
     let mut key = DatabaseKey::new();
     if !password.is_empty() {
         let password = std::str::from_utf8(password).map_err(|_| KdbxError::WrongKey)?;
@@ -71,13 +73,30 @@ pub fn open_file(
     if let Some(mut keyfile) = keyfile {
         key = key
             .with_keyfile(&mut keyfile)
-            .map_err(|e| KdbxError::Unreadable(e.to_string()))?;
+            .map_err(|_| KdbxError::Unreadable("can't read the key file".into()))?;
     }
-    Database::parse(file, key).map_err(|e| match e {
-        DatabaseOpenError::Key(DatabaseKeyError::IncorrectKey | DatabaseKeyError::EmptyKey) => {
-            KdbxError::WrongKey
-        }
-        e => KdbxError::Unreadable(e.to_string()),
+    // Fixed messages only: the crate's own can quote the file, and errors after
+    // decryption (XML parsing) or from a malformed key file would quote secrets.
+    Database::parse(file, key).map_err(|e| {
+        KdbxError::Unreadable(
+            match e {
+                DatabaseOpenError::Key(
+                    DatabaseKeyError::IncorrectKey | DatabaseKeyError::EmptyKey,
+                ) => {
+                    return KdbxError::WrongKey;
+                }
+                DatabaseOpenError::Key(_) => "the key file isn't valid",
+                DatabaseOpenError::UnsupportedVersion | DatabaseOpenError::VersionParse(_) => {
+                    "this kind of KeePass file isn't supported; save it as KDBX 4 in KeePass first"
+                }
+                DatabaseOpenError::Io(_) | DatabaseOpenError::UnexpectedEof => {
+                    "the file is incomplete"
+                }
+                DatabaseOpenError::Cryptography(_) => "the file is damaged: it doesn't decrypt",
+                _ => "the file is damaged, or not a KeePass file",
+            }
+            .into(),
+        )
     })
 }
 

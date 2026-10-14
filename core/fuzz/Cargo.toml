@@ -51,5 +51,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "local_state"
+path = "fuzz_targets/local_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kdbx"
+path = "fuzz_targets/kdbx.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

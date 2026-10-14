@@ -386,6 +386,29 @@ impl LocalStore for MemoryLocalStore {
 mod tests {
     use super::*;
 
+    /// Seeds for the `local_state` fuzz target: a sealed file the target can open (its
+    /// key is all zeros) and the bare record. Written when `STRATA_WRITE_SEEDS` is set.
+    #[test]
+    fn fuzz_seeds() {
+        let state = sample();
+        let sealed = state.seal_with_nonce(&key(0), &[7; NONCE_LEN]).unwrap();
+        assert_eq!(
+            SealedLocalState::parse(&sealed)
+                .unwrap()
+                .open(&key(0))
+                .unwrap(),
+            state
+        );
+        let record = cbor::encode(&state.record);
+        if std::env::var_os("STRATA_WRITE_SEEDS").is_some() {
+            let dir =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/seeds/local_state");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("sealed"), [&[0][..], &sealed].concat()).unwrap();
+            std::fs::write(dir.join("record"), [&[1][..], &record[..]].concat()).unwrap();
+        }
+    }
+
     fn key(b: u8) -> SecretKey {
         SecretKey::from_slice(&[b; 32]).unwrap()
     }

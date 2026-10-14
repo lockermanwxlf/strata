@@ -1,4 +1,4 @@
 target/
-corpus/
+# corpus/ is committed: the minimized corpora from tools/fuzz/minimize-wsl.sh.
 artifacts/
 coverage/

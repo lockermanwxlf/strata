@@ -8,6 +8,7 @@
 
 mod export;
 mod extras;
+pub mod header;
 mod import;
 
 pub use export::{ExportReport, export};

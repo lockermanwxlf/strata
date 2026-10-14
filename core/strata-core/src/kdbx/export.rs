@@ -56,7 +56,8 @@ pub fn export(view: &VaultView<'_>, password: &[u8]) -> Result<(Vec<u8>, ExportR
 
     let mut out = Vec::new();
     db.save(&mut out, DatabaseKey::new().with_password(password))
-        .map_err(|e| KdbxError::Write(e.to_string()))?;
+        // A fixed message: the crate's own could quote entry contents.
+        .map_err(|_| KdbxError::Write("the KeePass library couldn't write the file".into()))?;
     Ok((out, report))
 }
 

@@ -569,6 +569,37 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 - Walk through the threat model: each claim in spec §1 is mapped to the test that demonstrates it.
 - **External review** of the spec and the crypto code by someone qualified in applied cryptography. This is the step before trusting Strata with real passwords. When it's done, the spec's status changes to "Reviewed".
 
+**Status: done (2026-10-13), except the external review, which needs a reviewer.** The brief for them is [review-brief.md](review-brief.md).
+
+- **Fuzzing:**
+  - Two new targets cover every remaining parser of untrusted bytes:
+    - `local_state`: the device's state file, which someone with the device could rewrite.
+    - `kdbx`: the KeePass header check and `kdbx:entry`.
+  - Seeds for both come from Rust tests (`STRATA_WRITE_SEEDS=1 cargo test fuzz_seeds`), since local state has no test vectors.
+  - `tools/fuzz/minimize-wsl.sh` merges a run's corpora into `core/fuzz/corpus`, which is committed and seeds every later run.
+  - **Campaign (2026-10-13):**
+    - All seven targets ran in parallel in WSL for about 3.5 hours each, in two runs: WSL restarted 40 minutes into the first, and the corpora carried over.
+    - No crashes.
+    - Inputs executed per target ranged from about 0.8 billion (`envelopes`, the slowest, since it checks signatures and decrypts) to 8 billion (`names`, `padding`).
+    - `minimize-wsl.sh` merged the 10,143 inputs found down to 2,286, committed under `core/fuzz/corpus` (2.4 MB): `bodies` 654, `envelopes` 131, `kdbx` 915, `local_state` 281, `names` 159, `padding` 14, `reader` 132.
+- **KeePass hardening** (left over from Phase 12): `kdbx/header.rs` reads the unencrypted header first and refuses key-derivation costs that would exhaust memory or run for hours, and KeePass 1 files. KeePass errors now carry fixed messages, because the crate's own can quote decrypted content or a key file.
+- **Memory hygiene audit:**
+  - Secret-holding Rust types print as redacted, and FFI types that carry secrets have no `Debug`.
+  - No logging touches secrets.
+  - Panic messages are fixed strings.
+  - Heap copies are covered by `zeroize` and the zeroing allocator, and the crypto code wipes its own stack copies.
+  - `tests/hygiene.rs` pins all of this.
+  - On the Kotlin side, the only conversions to `String` are the documented ones (drawing a revealed value, the clipboard, showing recovery words). The recovery-word check now compares in place.
+  - What remains outside Strata's control is listed in [threat-model.md](threat-model.md#what-strata-does-not-protect-against).
+- **Threat model:**
+  - [threat-model.md](threat-model.md) maps every claim in spec §1 to its mechanism and tests.
+  - One claim had no direct test: that the remote learns no contents (§13). `ffi/tests.rs::the_remote_learns_no_contents_and_only_padded_sizes` now scans every vault and local-state file for entry contents, and checks that padding hides small size differences.
+- **Still manual:**
+  - The Android Keystore checklist on a real device.
+  - The Secure Enclave on a Mac.
+  - SAF cloud providers.
+  - FIDO2, which waits on a domain.
+
 ## 4. Order and parallelism
 
 ```

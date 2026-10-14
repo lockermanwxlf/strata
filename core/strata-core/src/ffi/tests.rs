@@ -691,3 +691,82 @@ fn keepass_export_spells_out_conflicts_and_skips_the_trash() {
         Err(VaultError::Locked)
     ));
 }
+
+/// Every file under `dir`, recursively: (path, bytes).
+fn all_files(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(all_files(&path));
+        } else {
+            out.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_remote_learns_no_contents_and_only_padded_sizes() {
+    // Spec §1 and §13: the remote and a stolen device's local state show no entry
+    // contents, names or tags, in file contents or file names.
+    let dirs = Dirs::new();
+    let vault = dirs.create().vault;
+    let id = new_entry_id().unwrap();
+    let markers: [&[u8]; 5] = [
+        b"Zanzibar-Title",
+        b"zanzibar-user",
+        b"https://zanzibar.example",
+        b"Zanzibar-Secret-Password",
+        b"zanzibar-tag",
+    ];
+    vault
+        .apply(vec![
+            set(&id, "title", markers[0]),
+            set(&id, "username", markers[1]),
+            set(&id, "url", markers[2]),
+            EntryEdit::SetField {
+                entry_id: id.clone(),
+                name: "password".into(),
+                value: Some(markers[3].to_vec()),
+                secret: true,
+            },
+            EntryEdit::AddTag {
+                entry_id: id.clone(),
+                tag: "zanzibar-tag".into(),
+            },
+        ])
+        .unwrap();
+    vault.sync().unwrap();
+    for root in [dirs.vault.path(), dirs.states.path()] {
+        for (path, bytes) in all_files(root) {
+            let name = path.to_string_lossy().to_lowercase();
+            assert!(!name.contains("zanzibar"), "{name}");
+            for marker in markers {
+                assert!(
+                    !bytes.windows(marker.len()).any(|w| w == marker),
+                    "{} holds {}",
+                    path.display(),
+                    String::from_utf8_lossy(marker)
+                );
+            }
+        }
+    }
+
+    // Padding: titles of 1 and 40 bytes give events of the same size.
+    let size_of_event_with = |title: &[u8]| {
+        let dirs = Dirs::new();
+        let vault = dirs.create().vault;
+        vault
+            .apply(vec![set(&new_entry_id().unwrap(), "title", title)])
+            .unwrap();
+        let events = dirs.vault.path().join("events");
+        let mut sizes: Vec<u64> = std::fs::read_dir(events)
+            .unwrap()
+            .map(|e| e.unwrap().metadata().unwrap().len())
+            .collect();
+        sizes.sort();
+        sizes
+    };
+    assert_eq!(size_of_event_with(b"a"), size_of_event_with(&[b'a'; 40]));
+}

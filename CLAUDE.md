@@ -79,7 +79,8 @@ vault/
 - `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/kdbx-check.sh`: has KeePassXC open Strata's KeePass export and checks what it sees (also in CI). The import fixtures come from `core/strata-core/tests/fixtures/kdbx/make.sh`, which uses KeePassXC too
 - `uv run core/tools/vectors/check.py`: recompute the test vectors with independent (non-Rust) implementations
 - `cd core && STRATA_WRITE_VECTORS=1 cargo test --test vectors`: regenerate vectors after a deliberate spec change; then run the check above
-- `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/run-wsl.sh 600`: fuzz every parser for 10 minutes in WSL, starting from `core/fuzz/seeds` (regenerate with `uv run core/tools/fuzz/make_seeds.py`). Fuzzing is Linux or CI only; see Gotchas
+- `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/minimize-wsl.sh`: after a long fuzzing run, merges what it found into `core/fuzz/corpus` (committed). Seeds for `local_state` and `kdbx` come from `STRATA_WRITE_SEEDS=1 cargo test fuzz_seeds`
+- `wsl -d Ubuntu -- bash /mnt/d/src/strata/core/tools/fuzz/run-wsl.sh 600`: fuzz every parser for 10 minutes in WSL, starting from `core/fuzz/seeds` (regenerate with `uv run core/tools/fuzz/make_seeds.py`). Fuzzing is Linux or CI only; see Gotchas. `docs/threat-model.md` maps each security claim to its tests: keep it current when adding one
 
 ## Gotchas
 

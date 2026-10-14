@@ -212,3 +212,30 @@ fn batches_stay_inside_the_event_limits() {
         assert!(bytes <= 768 * 1024, "{bytes}");
     }
 }
+
+/// Seeds for the `kdbx` fuzz target: a real header and a full `kdbx:entry`.
+/// Written when `STRATA_WRITE_SEEDS` is set.
+#[test]
+fn fuzz_seeds() {
+    let header = &FIXTURE[..FIXTURE.len().min(512)];
+    assert!(header::check(header).is_ok());
+    let imported = import(FIXTURE, PASSWORD, None).unwrap();
+    let extras = imported
+        .batches
+        .iter()
+        .flatten()
+        .find_map(|e| match e {
+            Edit::SetField { name, value, .. } if name == EXTRAS_FIELD => {
+                Some(value.as_ref().unwrap().expose().to_vec())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(Extras::decode(&extras).is_some());
+    if std::env::var_os("STRATA_WRITE_SEEDS").is_some() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/seeds/kdbx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("header"), [&[0][..], header].concat()).unwrap();
+        std::fs::write(dir.join("extras"), [&[1][..], &extras].concat()).unwrap();
+    }
+}

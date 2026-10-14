@@ -133,7 +133,8 @@ fun RecoveryWordsScreen(c: VaultController, screen: Screen.RecoveryWords) {
                 TextButton(onClick = { checking = false }) { Text("Show the words again") }
                 Button(onClick = {
                     wrong = positions.zip(answers).any { (i, state) ->
-                        state.text.toString().trim().lowercase() != words[i]
+                        // Compared in place: the typed words are part of the recovery key.
+                        !state.text.trim().contentEquals(words[i], ignoreCase = true)
                     }
                     if (!wrong) c.finishRecoveryWords(screen)
                 }) { Text("Done") }
