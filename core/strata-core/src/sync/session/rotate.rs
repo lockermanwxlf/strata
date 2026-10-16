@@ -19,7 +19,6 @@ use crate::keys::VaultFiles;
 use crate::keys::unlock::{Credential, open_keyring};
 use crate::local::LocalStore;
 use crate::local::Pin;
-use crate::merge::OpSet;
 use crate::merge::edit::Edit;
 use crate::merge::view::{EntryView, Field};
 use crate::sync::RemoteStore;
@@ -361,12 +360,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             .map(|(client, (seq, hash))| (client, seq, hash))
             .collect();
         self.become_new_client()?;
-        self.ops = OpSet::new();
-        self.applied = Default::default();
-        self.events.clear();
-        self.registry.clear();
-        self.snapshots.clear();
-        self.unreadable_snapshot = false;
+        self.forget_merged();
         self.lost_rotation = false;
         self.rotated_away = false;
         self.save()?;
@@ -394,9 +388,9 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                 note(&mut marks, client, seq, event.hash);
             }
         }
-        for (snapshot_epoch, watermark) in self.snapshots.values() {
-            if *snapshot_epoch < epoch {
-                for &(client, seq, hash) in watermark {
+        for snapshot in self.snapshots.values() {
+            if snapshot.epoch < epoch {
+                for &(client, seq, hash) in &snapshot.watermark {
                     note(&mut marks, client, seq, hash);
                 }
             }
@@ -450,7 +444,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                 return Err(e);
             }
         };
-        let watermark: Watermark = self.snapshots[&snapshot_id].1.clone();
+        let watermark: Watermark = self.snapshots[&snapshot_id].watermark.clone();
         let mut report = PurgeReport {
             rotated,
             events_deleted: 0,

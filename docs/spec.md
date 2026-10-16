@@ -285,7 +285,13 @@ An AEAD-valid file whose signature fails verification is **rejected and raises a
 **Retired devices.** After `RetireClient(c, last_seq)`:
 
 - Events from `c` with `s > last_seq` are applied and merged like any other. Their changes are flagged for review (§9.2).
-- A snapshot signed by `c` is accepted only if `watermark[c] <= last_seq`, and an epoch record signed by `c` only if `cutover[c] <= last_seq`. Anything else they sign is rejected.
+- A snapshot signed by `c` is accepted only if `watermark[c] <= last_seq`, and an epoch record signed by `c` only if `cutover[c] <= last_seq`. A missing entry counts as 0. Anything else they sign is rejected: set aside like any other invalid file, without an alarm. The signature is checked first, so a bad signature is still a forgery.
+- Such a record that is accepted still never wins a concurrent rotation (§7.2). It stays valid as history, for example an epoch that `c` created before it was retired.
+
+**Retirement and arrival order.** `last_seq` is the lowest among the `RetireClient(c, …)` ops the device has applied, plus any in the snapshot being checked. A retirement can arrive after a snapshot that it rules out: devices sync in different orders, and a device loads snapshots before events. So:
+
+- **Snapshots** are checked again after each sync applies new events. If a loaded snapshot is now ruled out, the device sets it aside for the rest of the session and rebuilds its op set from the remaining events and snapshots. It ends up where it would be had it seen the retirement first: the retired device's changes past `last_seq` reach the op set only through its own events, which are flagged for review (§9.2). If the rejected snapshot was the only evidence for events the device had already counted, the rebuild raises a rollback alarm (§9.4).
+- **Epoch records** are checked on every sync against the retirements known by then, so their order doesn't matter.
 
 ## 7. Epochs and rotation
 
@@ -622,9 +628,10 @@ Watermark entries are sorted by `client_id`, with no duplicates and no zero seqs
 ### 10.2 Loading
 
 1. Decrypt and validate the snapshot as in §9.1, steps 1 to 3: the envelope, decryption, and the creator's signature. A device that already knows the creator's key checks against it. Otherwise the key comes from the creator's own `RegisterDevice`, which the snapshot always retains (reduction never drops it), on the same trust-on-first-use basis as §6.3.
-2. For every watermark entry `(c, seq, hash)` whose event this device has applied, the hashes must match; otherwise raise a fork alarm.
-3. Take the union of its retained ops with the device's op set and re-reduce.
-4. Count every event up to the watermark as applied. The watermark's hash stands in for a compacted predecessor's file hash (§9.1).
+2. If the creator is retired, check `watermark[creator]` against its `last_seq`, and reject the snapshot if it is past it (§6.4).
+3. For every watermark entry `(c, seq, hash)` whose event this device has applied, the hashes must match; otherwise raise a fork alarm.
+4. Take the union of its retained ops with the device's op set and re-reduce.
+5. Count every event up to the watermark as applied. The watermark's hash stands in for a compacted predecessor's file hash (§9.1).
 
 An older snapshot is not a rollback: old snapshots stay until garbage collection, and loading one changes nothing (union is safe). Rollback is detected through coverage (§9.4). A high-water event that is missing must be covered by some snapshot's watermark, and when the watermark names exactly that seq its hash must match.
 

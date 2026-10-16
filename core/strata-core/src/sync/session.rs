@@ -1,7 +1,7 @@
 //! A sync session (spec §9.1, §9.4): an unlocked vault, its op set, and the rules
 //! for writing events and taking in other devices' events.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -81,6 +81,52 @@ pub const SNAPSHOT_WHEN_EVENT_FILES: usize = 512;
 /// A snapshot's watermark: `(client, seq, H(c, seq))` (spec §10.1).
 type Watermark = Vec<(Id, u64, [u8; 32])>;
 
+/// A snapshot this session loaded.
+struct LoadedSnapshot {
+    /// The epoch it was sealed in.
+    epoch: u32,
+    creator: Id,
+    watermark: Watermark,
+}
+
+impl LoadedSnapshot {
+    /// How far its watermark reaches into its own creator's events.
+    fn creator_seq(&self) -> u64 {
+        watermark_seq(&self.watermark, &self.creator)
+    }
+}
+
+fn watermark_seq(watermark: &Watermark, client: &Id) -> u64 {
+    watermark
+        .iter()
+        .find(|(c, _, _)| c == client)
+        .map_or(0, |&(_, seq, _)| seq)
+}
+
+/// Retired clients and the lowest `last_seq` each was retired at (spec §9.2).
+type Retired = BTreeMap<Id, u64>;
+
+fn note_retirement(retired: &mut Retired, op: &Op) {
+    if let Op::RetireClient {
+        client_id,
+        last_seq,
+    } = op
+    {
+        let limit = retired.entry(*client_id).or_insert(*last_seq);
+        *limit = (*limit).min(*last_seq);
+    }
+}
+
+/// Whether `signer` is retired and a file it signed reaches `seq` of its own events,
+/// past its `last_seq` (spec §6.4): such snapshots and epoch records are rejected.
+fn signed_after_retirement(retired: &Retired, signer: &Id, seq: u64) -> bool {
+    retired.get(signer).is_some_and(|&last_seq| seq > last_seq)
+}
+
+fn retired_signer(what: &'static str) -> CoreError {
+    CoreError::rejected(what, "signed by a retired device after its last change")
+}
+
 /// The garbage-collection grace period (spec §10.3, OPEN-9): 30 days.
 pub const GC_GRACE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
@@ -138,8 +184,10 @@ pub struct SessionOf<R, L> {
     alarm: Option<AlarmKind>,
     /// A newer epoch exists than this device holds (spec §7.2).
     rotated_away: bool,
-    /// Loaded snapshots: the epoch they were sealed in, and their watermark.
-    snapshots: BTreeMap<Id, (u32, Watermark)>,
+    snapshots: BTreeMap<Id, LoadedSnapshot>,
+    /// Snapshots set aside after they loaded, once a retirement ruled them out (spec
+    /// §6.4). They stay out for the rest of the session.
+    retired_snapshots: BTreeSet<Id>,
     /// A snapshot sealed under an epoch this device doesn't hold exists.
     unreadable_snapshot: bool,
     /// Event files at the last sync.
@@ -181,6 +229,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             latest_hlc: 0,
             alarm: None,
             snapshots: BTreeMap::new(),
+            retired_snapshots: BTreeSet::new(),
             unreadable_snapshot: false,
             event_files: 0,
             lost_rotation: false,
@@ -235,6 +284,38 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
 
     /// Uploads this device's pending events, then takes in every new event.
     pub fn sync(&mut self) -> Result<SyncReport> {
+        let mut report = self.take_in()?;
+        // A retirement can arrive after a snapshot it rules out: snapshots load
+        // before events. Start again without that snapshot, so the result is what
+        // seeing the retirement first would have given (spec §6.4).
+        let ruled_out = self.snapshots_after_retirement();
+        if !ruled_out.is_empty() {
+            self.retired_snapshots.extend(ruled_out);
+            self.forget_merged();
+            let uploaded = report.uploaded;
+            report = self.take_in()?;
+            report.uploaded += uploaded;
+        }
+
+        if !report.integrity_unverified {
+            self.check_high_water()?;
+        }
+        self.check_epoch_signatures(&mut report)?;
+        // Needs the device registry, so after the events are in.
+        self.lost_rotation = self.lost_to().is_some();
+        report.lost_rotation = self.lost_rotation;
+        if self.applied.get(&self.state.client_id) >= self.state.record.next_seq {
+            self.become_new_client()?;
+            report.identity_reset = true;
+        }
+        self.record_high_water();
+        self.save()?;
+        Ok(report)
+    }
+
+    /// The first half of `sync`: lists the store, loads new snapshots, uploads what's
+    /// pending and applies every new event.
+    fn take_in(&mut self) -> Result<SyncReport> {
         let mut report = SyncReport::default();
         let mut paths = self.store.list()?;
         self.refresh_epoch_files(&paths)?;
@@ -298,21 +379,39 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                 break;
             }
         }
-
-        if !report.integrity_unverified {
-            self.check_high_water()?;
-        }
-        self.check_epoch_signatures(&mut report)?;
-        // Needs the device registry, so after the events are in.
-        self.lost_rotation = self.lost_to().is_some();
-        report.lost_rotation = self.lost_rotation;
-        if self.applied.get(&self.state.client_id) >= self.state.record.next_seq {
-            self.become_new_client()?;
-            report.identity_reset = true;
-        }
-        self.record_high_water();
-        self.save()?;
         Ok(report)
+    }
+
+    /// Drops everything learned from events and snapshots, so they can be taken in
+    /// again from the store.
+    fn forget_merged(&mut self) {
+        self.ops = OpSet::new();
+        self.applied = VectorClock::default();
+        self.events.clear();
+        self.registry.clear();
+        self.latest_hlc = 0;
+        self.snapshots.clear();
+        self.unreadable_snapshot = false;
+    }
+
+    /// Every retired client in the op set, with its `last_seq` (spec §9.2).
+    fn retired(&self) -> Retired {
+        let mut retired = Retired::new();
+        for record in self.ops.iter() {
+            note_retirement(&mut retired, &record.op);
+        }
+        retired
+    }
+
+    /// Loaded snapshots whose creators are now known to have been retired before
+    /// they wrote them (spec §6.4).
+    fn snapshots_after_retirement(&self) -> Vec<Id> {
+        let retired = self.retired();
+        self.snapshots
+            .iter()
+            .filter(|(_, s)| signed_after_retirement(&retired, &s.creator, s.creator_seq()))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Writes `edits` as this device's next event (spec §8). The seq is persisted
@@ -569,8 +668,8 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                     .binary_search(&FileName::Snapshot { snapshot_id: **id }.to_path())
                     .is_ok()
             });
-            for (_, (_, watermark)) in present {
-                for &(c, s, h) in watermark {
+            for (_, snapshot) in present {
+                for &(c, s, h) in &snapshot.watermark {
                     if c == client && s >= seq {
                         if s == seq && h != hash {
                             return Err(self.raise(AlarmKind::Fork));
@@ -617,6 +716,12 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                 continue;
             };
             if self.snapshots.contains_key(&snapshot_id) {
+                continue;
+            }
+            if self.retired_snapshots.contains(&snapshot_id) {
+                report
+                    .rejected
+                    .push((path.clone(), retired_signer("snapshot")));
                 continue;
             }
             let bytes = match self.store.read(path, snapshot::MAX_FILE_LEN) {
@@ -677,6 +782,16 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
         if !sealed.signature_valid(&creator_pk) {
             return Err(self.raise(AlarmKind::Forgery));
         }
+        // Retirements in the snapshot count too, so the verdict doesn't depend on
+        // whether this device had already applied them (spec §6.4).
+        let mut retired = self.retired();
+        for retained in &body.ops {
+            note_retirement(&mut retired, &retained.op);
+        }
+        let creator_seq = watermark_seq(&body.watermark, &header.creator);
+        if signed_after_retirement(&retired, &header.creator, creator_seq) {
+            return Ok(Some(retired_signer("snapshot")));
+        }
         for &(client, seq, hash) in &body.watermark {
             if self
                 .events
@@ -719,8 +834,14 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                 );
             }
         }
-        self.snapshots
-            .insert(header.snapshot_id, (header.epoch, body.watermark));
+        self.snapshots.insert(
+            header.snapshot_id,
+            LoadedSnapshot {
+                epoch: header.epoch,
+                creator: header.creator,
+                watermark: body.watermark,
+            },
+        );
         Ok(None)
     }
 
@@ -792,8 +913,14 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             .record
             .snapshots
             .push((snapshot_id, hlc::now_ms()));
-        self.snapshots
-            .insert(snapshot_id, (header.epoch, body.watermark));
+        self.snapshots.insert(
+            snapshot_id,
+            LoadedSnapshot {
+                epoch: header.epoch,
+                creator: client,
+                watermark: body.watermark,
+            },
+        );
         self.save()?;
         Ok(snapshot_id)
     }
@@ -827,7 +954,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
             if !self.state.record.snapshots.iter().any(|(s, _)| *s == id) {
                 continue; // already deleted as dominated by a newer one
             }
-            let watermark = self.snapshots[&id].1.clone();
+            let watermark = self.snapshots[&id].watermark.clone();
             let covers =
                 |client: &Id, seq: u64| watermark.iter().any(|(c, s, _)| c == client && seq <= *s);
             for path in &paths {
@@ -849,7 +976,7 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
                         && self
                             .snapshots
                             .get(other)
-                            .is_some_and(|(_, w)| w.iter().all(|(c, s, _)| covers(c, *s)))
+                            .is_some_and(|s| s.watermark.iter().all(|(c, s, _)| covers(c, *s)))
                 })
                 .collect();
             for other in dominated {
@@ -928,18 +1055,12 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     /// The lowest key ID among records for `epoch` that beat `ours` (spec §7.2): a
     /// lower key ID, signed by a registered device that isn't retired. Unverifiable
     /// records never win, so storage alone can't make a device give up its key, and
-    /// neither can a revoked device holding the previous key.
+    /// neither can a revoked device holding the previous key, even with a record it
+    /// was allowed to sign (spec §6.4).
     fn competing_winner(&self, epoch: u32, ours: &[u8; 32]) -> Option<[u8; 32]> {
-        let retired: HashSet<Id> = self
-            .ops
-            .iter()
-            .filter_map(|r| match r.op {
-                Op::RetireClient { client_id, .. } => Some(client_id),
-                _ => None,
-            })
-            .collect();
+        let retired = self.retired();
         self.epoch_records()
-            .filter(|r| r.epoch == epoch && r.key_id < *ours && !retired.contains(&r.creator))
+            .filter(|r| r.epoch == epoch && r.key_id < *ours && !retired.contains_key(&r.creator))
             .filter(|r| {
                 self.registry
                     .get(&r.creator)
@@ -962,12 +1083,25 @@ impl<R: RemoteStore, L: LocalStore> SessionOf<R, L> {
     }
 
     /// Epoch-record signatures (spec §6.4), checked once the creator is registered.
+    /// A record a retired device signed after its `last_seq` is rejected. Records are
+    /// checked on every sync, so a retirement that arrives later still counts.
     fn check_epoch_signatures(&mut self, report: &mut SyncReport) -> Result<()> {
+        let retired = self.retired();
         let mut forged = false;
-        for record in self.epoch_records() {
+        for (path, bytes) in &self.epoch_files {
+            let Ok(record) = EpochRecord::parse(bytes, &self.vault_id) else {
+                continue;
+            };
             match self.registry.get(&record.creator) {
                 Some(pk) if !record.signature_valid(pk) => forged = true,
-                Some(_) => {}
+                Some(_) => {
+                    let seq = record.cutover.get(&record.creator);
+                    if signed_after_retirement(&retired, &record.creator, seq) {
+                        report
+                            .rejected
+                            .push((path.clone(), retired_signer("epoch record")));
+                    }
+                }
                 None => report.unverified_epoch_records += 1,
             }
         }

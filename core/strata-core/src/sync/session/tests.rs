@@ -1369,6 +1369,196 @@ fn a_revoked_device_cant_win_the_current_epoch_after_the_fact() {
     a.write(vec![set(X, "title", "still writing")]).unwrap();
 }
 
+/// Puts a change into `session`'s op set that no event carries, attributed to
+/// `client`'s event `seq`: what a key holder's doctored snapshot would carry.
+fn plant(session: &mut Session<'_>, client: Id, seq: u64, entry: Id) {
+    let clock = Arc::new(session.applied.clone());
+    session.ops.insert(OpRecord {
+        dot: Dot {
+            client_id: client,
+            seq,
+            op_index: 7,
+        },
+        hlc: session.latest_hlc + 1,
+        clock,
+        op: Op::SetField {
+            entry_id: entry,
+            name: "title".into(),
+            value: Some(SecretBytes::from_slice(b"planted")),
+            secret: false,
+        },
+    });
+}
+
+fn rejected(report: &SyncReport, path: &str) -> bool {
+    report.rejected.iter().any(|(p, _)| p == path)
+}
+
+#[test]
+fn a_snapshot_a_retired_device_signs_after_its_last_seq_is_rejected() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    a.write(vec![set(X, "title", "a")]).unwrap();
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    a.sync().unwrap();
+    a.write(vec![Edit::RetireClient {
+        client_id: b.client_id(),
+        last_seq: 1,
+    }])
+    .unwrap();
+
+    // B hasn't heard. It writes on, then signs a snapshot reaching its seq 2 that
+    // carries a change attributed to A, which no event holds.
+    b.write(vec![set(X, "notes", "after retirement")]).unwrap();
+    plant(&mut b, a.client_id(), 1, Y);
+    let snapshot = FileName::Snapshot {
+        snapshot_id: b.write_snapshot().unwrap(),
+    }
+    .to_path();
+
+    // A knows of the retirement: the snapshot is set aside on sight, not an alarm.
+    // B's event still merges, flagged for review (spec §9.2).
+    let report = a.sync().unwrap();
+    assert!(rejected(&report, &snapshot));
+    assert_eq!(report.snapshots_loaded, 0);
+    assert!(!a.view().entries.contains_key(&Y));
+    assert_eq!(field(&a, X, "notes").as_deref(), Some("after retirement"));
+    assert_eq!(
+        a.review().flagged,
+        vec![Dot {
+            client_id: b.client_id(),
+            seq: 2,
+            op_index: 0,
+        }]
+    );
+
+    // A fresh device loads snapshots before events, so it learns of the retirement
+    // only after loading this one. It starts over without it.
+    let c_local = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &c_local, Credential::Password(PASSWORD)).unwrap();
+    let mut c = Session::new(&store, &c_local, unlocked, "Tablet").unwrap();
+    let report = c.sync().unwrap();
+    assert!(rejected(&report, &snapshot));
+    assert_eq!(report.snapshots_loaded, 0);
+    assert_eq!(contents(&c), contents(&a));
+    assert!(rejected(&c.sync().unwrap(), &snapshot), "stays set aside");
+    assert_eq!(c.alarm(), None);
+}
+
+#[test]
+fn a_snapshot_loaded_before_the_retirement_that_rules_it_out_is_taken_back() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    let c_local = MemoryLocalStore::new();
+    let mut c = open(&store, &c_local, "Tablet");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    c.sync().unwrap();
+    b.write(vec![set(X, "notes", "later")]).unwrap();
+    let b_id = b.client_id();
+    plant(&mut b, b_id, 2, Y);
+    let snapshot = FileName::Snapshot {
+        snapshot_id: b.write_snapshot().unwrap(),
+    }
+    .to_path();
+
+    // Nobody has retired B yet, so A takes the snapshot in.
+    assert_eq!(a.sync().unwrap().snapshots_loaded, 1);
+    assert!(a.view().entries.contains_key(&Y));
+
+    // C, which saw B only up to seq 1, retires it there. A's next sync takes the
+    // snapshot back out, ending where it would have had it seen C's event first.
+    c.write(vec![Edit::RetireClient {
+        client_id: b.client_id(),
+        last_seq: 1,
+    }])
+    .unwrap();
+    let report = a.sync().unwrap();
+    assert!(rejected(&report, &snapshot));
+    assert!(!a.view().entries.contains_key(&Y));
+    assert_eq!(field(&a, X, "notes").as_deref(), Some("later"));
+    assert_eq!(a.alarm(), None);
+    let d_local = MemoryLocalStore::new();
+    let d = open(&store, &d_local, "Desktop");
+    assert_eq!(contents(&a), contents(&d));
+    // A keeps writing on top of the rebuilt state.
+    a.write(vec![set(X, "title", "a")]).unwrap();
+}
+
+#[test]
+fn an_epoch_record_a_retired_device_signs_after_its_last_seq_is_rejected() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    let c_local = MemoryLocalStore::new();
+    let mut c = open(&store, &c_local, "Tablet");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    c.sync().unwrap();
+    // C retires B at seq 1. Its event is held back from the store for now, so A
+    // sees B's record first.
+    c.write(vec![Edit::RetireClient {
+        client_id: b.client_id(),
+        last_seq: 1,
+    }])
+    .unwrap();
+    let retire_path = event_path(c.client_id(), 1);
+    let retire = store.get(&retire_path).unwrap();
+    store.delete(&retire_path).unwrap();
+
+    // B writes on and signs a record whose cutover reaches its seq 2.
+    b.write(vec![set(X, "title", "b again")]).unwrap();
+    let (path, past) = rival_record(&b, b.client_id(), &b.device, [0xff; 32]);
+    store.put(&path, past);
+    assert!(!rejected(&a.sync().unwrap(), &path));
+
+    // Once the retirement arrives, the record is checked again: rejected, no alarm.
+    store.put(&retire_path, retire);
+    let report = a.sync().unwrap();
+    assert!(rejected(&report, &path));
+    assert_eq!(report.unverified_epoch_records, 0);
+    assert_eq!(a.alarm(), None);
+
+    // A record B signed with a cutover within its last_seq stays valid history
+    // (though it never wins a rotation, spec §7.2).
+    let (_, within) = rival_record(&c, b.client_id(), &b.device, [0xff; 32]);
+    store.put(&path, within);
+    let unlocked = unlock(&store, &a_local, Credential::Password(PASSWORD)).unwrap();
+    let mut a = Session::new(&store, &a_local, unlocked, "Laptop").unwrap();
+    let report = a.sync().unwrap();
+    assert!(!rejected(&report, &path));
+    assert_eq!(a.alarm(), None);
+}
+
+#[test]
+fn a_revoked_devices_snapshot_within_its_last_seq_still_loads() {
+    let (store, a_local) = new_vault();
+    let mut a = open(&store, &a_local, "Laptop");
+    let b_local = MemoryLocalStore::new();
+    let mut b = open(&store, &b_local, "Phone");
+    b.write(vec![set(X, "title", "b")]).unwrap();
+    b.write_snapshot().unwrap();
+    // B compacts, so its snapshot is now the only copy of its change.
+    b.collect_garbage(0).unwrap();
+    assert_eq!(event_count(&store), 0);
+    a.sync().unwrap();
+    a.revoke_device(b.client_id(), PASSWORD).unwrap();
+
+    // A fresh device, unlocking at epoch 1, still loads the snapshot B sealed under
+    // epoch 0 before it was retired.
+    let c_local = MemoryLocalStore::new();
+    let unlocked = unlock(&store, &c_local, Credential::Password(PASSWORD)).unwrap();
+    let mut c = Session::new(&store, &c_local, unlocked, "Tablet").unwrap();
+    let report = c.sync().unwrap();
+    assert_eq!(report.snapshots_loaded, 1);
+    assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+    assert_eq!(field(&c, X, "title").as_deref(), Some("b"));
+    assert!(c.review().flagged.is_empty());
+}
+
 #[test]
 fn the_loser_of_a_concurrent_rotation_rejoins_and_keeps_its_changes() {
     let (store, a_local) = new_vault();
