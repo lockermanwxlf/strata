@@ -626,7 +626,7 @@ The vault folder was the only place a vault's contents lived, so a sync tool tha
 - Before, a crashed password change also failed on every retry, because the record's name was taken.
 - **Tests** crash writes three ways (truncated, zero-filled as FAT can leave them, and whole but unacknowledged), for events and for a password change.
 
-**Optional next:** notes keep both values on concurrent edits, like secret fields.
+**Done (2026-10-14): notes keep both values.** Concurrent edits to `notes` became last-writer-wins and silently lost one side. Now they are a conflict, like secret fields, but stay plain text: resolving keeps the field non-secret, and the editor treats a field in conflict as unchanged unless the user types a replacement. The merge vector has a notes conflict, so `check.py` verifies the rule independently.
 
 ## 4. Order and parallelism
 

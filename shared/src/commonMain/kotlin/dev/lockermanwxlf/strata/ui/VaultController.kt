@@ -405,8 +405,9 @@ class VaultController(
     fun keep(id: String) = save(listOf(EntryEdit.KeepEntry(id))) {}
 
     /** Settles a conflict with [value] (wiped), or by removing the field (`null`). */
-    fun resolve(id: String, field: String, value: ByteArray?) =
-        save(listOf(EntryEdit.SetField(id, field, value, secret = true)))
+    /** Settles a conflict with [value] (wiped), keeping the field secret or not as it was. */
+    fun resolve(id: String, field: String, value: ByteArray?, secret: Boolean) =
+        save(listOf(EntryEdit.SetField(id, field, value, secret)))
 
     fun purge(id: String, password: ByteArray) = perform {
         val summary = vault?.purge(id, password) ?: return@perform

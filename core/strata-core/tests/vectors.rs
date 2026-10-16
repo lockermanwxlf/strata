@@ -619,7 +619,7 @@ fn view_json(view: &VaultView<'_>) -> Value {
                         } => {
                             json!({"secret": secret, "value": h(value.expose()), "dot": dot(d)})
                         }
-                        Field::Conflict { candidates } => json!({"conflict": candidates
+                        Field::Conflict { candidates, .. } => json!({"conflict": candidates
                             .iter()
                             .map(|c| json!([c.value.map(|v| h(v.expose())), dot(&c.dot)]))
                             .collect::<Vec<_>>()}),
@@ -758,7 +758,11 @@ fn merge_vectors() -> Value {
                 2,
                 6,
                 vec![(a, 1), (b, 2)],
-                vec![set(x, "title", "Bank (B)", false)],
+                vec![
+                    set(x, "title", "Bank (B)", false),
+                    // Concurrent with A2's notes: both kept (notes are multi-value).
+                    set(v, "notes", "n2 from B", false),
+                ],
             ),
         ]
     };

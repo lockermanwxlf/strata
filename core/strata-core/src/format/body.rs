@@ -23,6 +23,9 @@ pub const MAX_NAME_LEN: usize = 128;
 /// Well-known fields that MUST be secret (spec §8.2).
 pub(crate) const ALWAYS_SECRET_FIELDS: [&str; 2] = ["password", "otp"];
 /// Field names with a meaning of their own (spec §8.2).
+/// Fields whose concurrent writes are kept as a conflict even when not secret, so
+/// neither side's text is lost (spec §9.2).
+pub const MULTI_VALUE_FIELDS: [&str; 1] = ["notes"];
 pub(crate) const WELL_KNOWN_FIELDS: [&str; 6] =
     ["title", "username", "password", "url", "notes", "otp"];
 

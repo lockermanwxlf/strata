@@ -434,6 +434,9 @@ def check_files():
 # ---- Merge (spec §9.2), written out from the spec's definitions -------------
 
 
+MULTI_VALUE_FIELDS = {"notes"}
+
+
 def check_merge():
     v = load("merge.json")
     ops = []  # (client, seq, index, hlc, clock, op)
@@ -467,7 +470,8 @@ def check_merge():
             group = of("SetField", entry_id=entry_id, name=name)
             cands = [w for w in group if not any(before(w, other) for other in group)]
             secret = any(c[5]["secret"] for c in cands)
-            if secret and len(cands) > 1:
+            # Secret fields and multi-value fields (notes) keep concurrent values (spec §9.2).
+            if (secret or name in MULTI_VALUE_FIELDS) and len(cands) > 1:
                 if all(c[5]["value"] is None for c in cands):
                     continue
                 cands.sort(key=lambda c: (bytes.fromhex(c[0]), c[1], c[2]))

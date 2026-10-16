@@ -52,7 +52,7 @@ vault/
 
 - **Each event:** ID, hybrid logical clock timestamp, causal info (vector clock or parents), an AEAD payload, and the writing device's signature. The vault ID, event ID and epoch are bound in as associated data.
 - **Merge** is deterministic and order-independent (CRDT-style): per-field registers, tombstones for deletes, sets for tags.
-- **Secret fields don't use LWW.** Concurrent password changes keep both values and surface a conflict to the user.
+- **Secret fields and notes don't use LWW.** Concurrent edits keep both values and surface a conflict to the user (`MULTI_VALUE_FIELDS` in `format/body.rs` lists the non-secret fields that do this; `check.py` mirrors it).
 - **Compaction:** snapshots keep the causal metadata of the ops they retain, so compaction is exact at any time. Event files a snapshot covers are deleted after a grace period. True purge rewrites history and rotates the epoch.
 - **Rollback/fork detection:** each client hash-chains its own events. Every device stores the last-seen seq per client, and a regression raises an alarm.
 - **Size padding:** pad payloads to size buckets.

@@ -954,3 +954,66 @@ fn a_vanished_password_slot_is_kept_and_restored() {
     // A new device can unlock with the password again.
     dirs.open("phone");
 }
+
+#[test]
+fn concurrent_notes_edits_keep_both_and_resolve_to_plain_text() {
+    let dirs = Dirs::new();
+    let laptop = dirs.create().vault;
+    let phone = dirs.open("phone");
+    let id = new_entry_id().unwrap();
+    laptop.apply(vec![set(&id, "title", b"Bank")]).unwrap();
+    phone.sync().unwrap();
+    laptop
+        .apply(vec![set(&id, "notes", b"PIN hint: the old house")])
+        .unwrap();
+    phone
+        .apply(vec![set(&id, "notes", b"Branch: Main St.")])
+        .unwrap();
+    laptop.sync().unwrap();
+
+    assert_eq!(laptop.status().conflicts, 1);
+    let notes = laptop
+        .entry(id.clone())
+        .unwrap()
+        .fields
+        .into_iter()
+        .find(|f| f.name == "notes")
+        .unwrap();
+    assert_eq!((notes.conflict_candidates, notes.secret), (2, false));
+    let mut values: Vec<Vec<u8>> = laptop
+        .reveal_conflict(id.clone(), "notes".into())
+        .unwrap()
+        .into_iter()
+        .map(|c| c.value.unwrap())
+        .collect();
+    values.sort();
+    assert_eq!(
+        values,
+        [
+            b"Branch: Main St.".to_vec(),
+            b"PIN hint: the old house".to_vec()
+        ]
+    );
+
+    // Resolving writes a plain value that dominates both.
+    laptop
+        .apply(vec![set(
+            &id,
+            "notes",
+            b"Branch: Main St. PIN hint: the old house",
+        )])
+        .unwrap();
+    phone.sync().unwrap();
+    let notes = phone
+        .entry(id)
+        .unwrap()
+        .fields
+        .into_iter()
+        .find(|f| f.name == "notes")
+        .unwrap();
+    assert_eq!(notes.conflict_candidates, 0);
+    assert_eq!(
+        notes.value.as_deref(),
+        Some("Branch: Main St. PIN hint: the old house")
+    );
+}

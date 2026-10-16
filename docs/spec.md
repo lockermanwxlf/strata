@@ -479,7 +479,7 @@ An HLC value is 64 bits: the top 48 bits are Unix time in milliseconds and the l
 - Readers MUST reject an event whose HLC is not greater than its own predecessor's, when the predecessor is available.
 - Readers SHOULD warn about an HLC more than 24 hours in the future.
 
-The HLC orders concurrent non-secret writes (§9.2) and is shown in history. It never decides causality. Vector clocks do that.
+The HLC orders concurrent writes to fields that use last-writer-wins (§9.2) and is shown in history. It never decides causality. Vector clocks do that.
 
 ## 9. Sync and merge
 
@@ -514,10 +514,10 @@ The vault's state is a pure function of the **set** of applied ops. Arrival orde
 
 - `W` is the set of `SetField` ops on `(x, f)`.
 - The candidates are `C = { w ∈ W : no w' ∈ W with w → w' }`.
-- **Secret field** (any candidate has `secret = true`):
+- **Secret field or multi-value field** (any candidate has `secret = true`, or the field is `notes`). Notes are free text where a lost edit hurts, so they keep both sides like secrets do; the conflict is secret if any candidate is:
   - `|C| = 1`: the field's value is that candidate.
   - `|C| > 1`: a **conflict**. All candidate values are shown to the user, with `null` displayed as "deleted". If every candidate is `null`, nothing is in conflict and the field is absent. To resolve it, the user writes a new `SetField`, which dominates every candidate. This is how "concurrent password changes keep both values" works.
-- **Non-secret field:** the value is the candidate with the greatest `(hlc, client_id, seq, op_index)`. This is last-writer-wins, restricted to concurrent writes.
+- **Any other field:** the value is the candidate with the greatest `(hlc, client_id, seq, op_index)`. This is last-writer-wins, restricted to concurrent writes.
 - A field whose resolved value is `null` is absent.
 
 **Entries.** For entry `x`, `Writes(x)` is all `SetField` and `KeepEntry` ops on `x`, and `Deletes(x)` is all `DeleteEntry` ops on `x`.

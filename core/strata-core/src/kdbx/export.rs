@@ -203,9 +203,9 @@ fn add_entry(
 fn values<'a>(field: &Field<'a>) -> Vec<(&'a SecretBytes, bool)> {
     match field {
         Field::Value { value, secret, .. } => vec![(*value, *secret)],
-        Field::Conflict { candidates } => candidates
+        Field::Conflict { candidates, secret } => candidates
             .iter()
-            .filter_map(|c| c.value.map(|v| (v, true)))
+            .filter_map(|c| c.value.map(|v| (v, *secret)))
             .collect(),
     }
 }

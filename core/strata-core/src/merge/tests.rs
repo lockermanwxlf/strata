@@ -81,7 +81,7 @@ fn summary(view: &super::view::VaultView<'_>) -> String {
                         hex::encode(value.expose())
                     );
                 }
-                Field::Conflict { candidates } => {
+                Field::Conflict { candidates, .. } => {
                     for c in candidates {
                         let v = c
                             .value
@@ -135,7 +135,7 @@ fn concurrent_secret_writes_conflict_until_resolved() {
     ];
     let mut set = set_of(base);
     let view = set.view();
-    let Field::Conflict { candidates } = &view.entries[&X].fields["password"] else {
+    let Field::Conflict { candidates, .. } = &view.entries[&X].fields["password"] else {
         panic!("expected a conflict");
     };
     let values: Vec<_> = candidates
@@ -501,7 +501,7 @@ fn a_conflict_between_deletions_is_no_conflict() {
         ),
     ]);
     let view = set.view();
-    let Field::Conflict { candidates } = &view.entries[&X].fields["password"] else {
+    let Field::Conflict { candidates, .. } = &view.entries[&X].fields["password"] else {
         panic!("expected a conflict");
     };
     assert!(matches!(
@@ -851,4 +851,68 @@ fn a_retired_devices_later_ops_still_merge_the_same_in_any_order() {
     assert_eq!(view.devices[&B].retired_after, Some(1));
     drop(view);
     assert_reduction_keeps_view(&mut backward);
+}
+
+#[test]
+fn concurrent_notes_edits_keep_both_until_resolved() {
+    let events = |resolved: bool| {
+        let mut events = vec![
+            (
+                A,
+                1,
+                10,
+                vec![(A, 1)],
+                vec![
+                    register(A, "A"),
+                    set_field(X, "notes", Some(b"A's notes"), false),
+                ],
+            ),
+            (
+                B,
+                1,
+                11,
+                vec![(B, 1)],
+                vec![
+                    register(B, "B"),
+                    set_field(X, "notes", Some(b"B's notes"), false),
+                ],
+            ),
+        ];
+        if resolved {
+            events.push((
+                A,
+                2,
+                20,
+                vec![(A, 2), (B, 1)],
+                vec![set_field(X, "notes", Some(b"both"), false)],
+            ));
+        }
+        set_of(events)
+    };
+    // Not last-writer-wins: both kept, and the conflict isn't secret.
+    let mut set = events(false);
+    let view = set.view();
+    let Field::Conflict { candidates, secret } = &view.entries[&X].fields["notes"] else {
+        panic!("expected a conflict");
+    };
+    assert!(!secret);
+    let mut values: Vec<_> = candidates
+        .iter()
+        .map(|c| c.value.unwrap().expose().to_vec())
+        .collect();
+    values.sort();
+    assert_eq!(values, [b"A's notes".to_vec(), b"B's notes".to_vec()]);
+    assert_reduction_keeps_view(&mut set);
+
+    // A write that saw both resolves it, still not secret.
+    let set = events(true);
+    let view = set.view();
+    assert!(matches!(
+        view.entries[&X].fields["notes"],
+        Field::Value { secret: false, .. }
+    ));
+    assert_eq!(
+        value(view.entries[&X].fields.get("notes")),
+        Some(b"both".to_vec())
+    );
 }

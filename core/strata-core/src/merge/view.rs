@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{Groups, OpRecord, OpSet, happened_before};
 use crate::crypto::SecretBytes;
 use crate::format::Id;
-use crate::format::body::{Dot, Op};
+use crate::format::body::{Dot, MULTI_VALUE_FIELDS, Op};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct VaultView<'a> {
@@ -36,8 +36,13 @@ pub enum Field<'a> {
         /// The write that set it, for attribution and history.
         dot: Dot,
     },
-    /// Concurrent writes to a secret field (spec §9.2). Sorted by dot.
-    Conflict { candidates: Vec<Candidate<'a>> },
+    /// Concurrent writes to a secret field or a multi-value field such as `notes`
+    /// (spec §9.2). Sorted by dot.
+    Conflict {
+        candidates: Vec<Candidate<'a>>,
+        /// Some candidate is secret.
+        secret: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,7 +70,9 @@ impl OpSet {
             .map(|(entry_id, writes)| (*entry_id, entry_status(&groups, entry_id, writes)))
             .collect();
         for ((entry_id, name), writes) in &groups.fields {
-            if let (Some(entry), Some(field)) = (entries.get_mut(entry_id), resolve_field(writes)) {
+            if let (Some(entry), Some(field)) =
+                (entries.get_mut(entry_id), resolve_field(name, writes))
+            {
                 entry.fields.insert(*name, field);
             }
         }
@@ -104,7 +111,7 @@ fn entry_status<'a>(groups: &Groups<'a>, entry_id: &Id, writes: &[&'a OpRecord])
 }
 
 /// One field register (spec §9.2).
-fn resolve_field<'a>(writes: &[&'a OpRecord]) -> Option<Field<'a>> {
+fn resolve_field<'a>(name: &str, writes: &[&'a OpRecord]) -> Option<Field<'a>> {
     let mut candidates: Vec<&OpRecord> = writes
         .iter()
         .filter(|w| !writes.iter().any(|other| happened_before(w, other)))
@@ -115,7 +122,7 @@ fn resolve_field<'a>(writes: &[&'a OpRecord]) -> Option<Field<'a>> {
         _ => unreachable!("field groups hold only SetField"),
     };
     let secret = candidates.iter().any(|c| set_field(c).1);
-    if secret && candidates.len() > 1 {
+    if (secret || MULTI_VALUE_FIELDS.contains(&name)) && candidates.len() > 1 {
         if candidates.iter().all(|c| set_field(c).0.is_none()) {
             return None;
         }
@@ -128,9 +135,10 @@ fn resolve_field<'a>(writes: &[&'a OpRecord]) -> Option<Field<'a>> {
                     dot: c.dot,
                 })
                 .collect(),
+            secret,
         });
     }
-    // One candidate, or last-writer-wins among concurrent non-secret writes.
+    // One candidate, or last-writer-wins among concurrent writes to other fields.
     let winner = candidates.iter().max_by_key(|c| c.lww_key())?;
     let (value, _) = set_field(winner);
     value.map(|value| Field::Value {

@@ -704,9 +704,9 @@ impl Vault {
                         value: (!secret).then(|| text(value)),
                         conflict_candidates: 0,
                     },
-                    Field::Conflict { candidates } => FieldInfo {
+                    Field::Conflict { candidates, secret } => FieldInfo {
                         name: name.to_string(),
-                        secret: true,
+                        secret: *secret,
                         value: None,
                         conflict_candidates: count(candidates.len()),
                     },
@@ -747,7 +747,7 @@ impl Vault {
         self.with_session(|s| {
             let view = s.view();
             let entry = view.entries.get(&id).ok_or(not_found("entry"))?;
-            let Some(Field::Conflict { candidates }) = entry.fields.get(field.as_str()) else {
+            let Some(Field::Conflict { candidates, .. }) = entry.fields.get(field.as_str()) else {
                 return Err(not_found("conflict"));
             };
             Ok(candidates

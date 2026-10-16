@@ -241,6 +241,13 @@
           "secret": false,
           "type": "SetField",
           "value": "42616e6b20284229"
+        },
+        {
+          "entry_id": "303132333435363738393a3b3c3d3e3f",
+          "name": "notes",
+          "secret": false,
+          "type": "SetField",
+          "value": "6e322066726f6d2042"
         }
       ],
       "seq": 2
@@ -332,13 +339,24 @@
         "deleted": false,
         "fields": {
           "notes": {
-            "dot": [
-              "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
-              2,
-              3
-            ],
-            "secret": false,
-            "value": "6e32"
+            "conflict": [
+              [
+                "6e32",
+                [
+                  "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+                  2,
+                  3
+                ]
+              ],
+              [
+                "6e322066726f6d2042",
+                [
+                  "b0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+                  2,
+                  1
+                ]
+              ]
+            ]
           },
           "title": {
             "dot": [

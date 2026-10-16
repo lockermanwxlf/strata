@@ -568,7 +568,8 @@ fn revert_entry(
             || {
                 matches!(
                     have,
-                    Some(Field::Value { secret: true, .. }) | Some(Field::Conflict { .. })
+                    Some(Field::Value { secret: true, .. })
+                        | Some(Field::Conflict { secret: true, .. })
                 )
             },
             |(_, secret)| secret,

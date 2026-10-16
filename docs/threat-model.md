@@ -65,7 +65,7 @@ These aren't claims of spec §1, which is about attackers, but they are what use
 | A crash mid-write doesn't raise a false alarm or block the vault | Leftovers at a device's own names are replaced; only parsed epoch records count (§5) | `sync/session/tests.rs::a_half_written_event_from_a_crash_is_replaced_not_a_fork`, `an_event_published_before_a_crash_and_resealed_after_a_rotation_is_not_a_fork`, `a_half_written_epoch_record_doesnt_block_the_next_password_change` |
 | Files are never modified in place | Create-only writes (§5) | `sync/fs_store.rs::create_never_overwrites_and_list_skips_temp_files`, `sync/foreign_store.rs::behaves_like_a_store` |
 | Compaction loses nothing | Exact reduction (§9.3) | `sync/session/tests.rs::compaction_never_changes_the_vault`, `after_compaction_a_fresh_device_still_sees_everything` |
-| Concurrent password changes keep both values | Secret fields conflict instead of overwriting (§9.2) | `merge/tests.rs::concurrent_secret_writes_conflict_until_resolved` |
+| Concurrent password or notes edits keep both values | Secret fields and notes conflict instead of overwriting (§9.2) | `merge/tests.rs::concurrent_secret_writes_conflict_until_resolved`, `concurrent_notes_edits_keep_both_until_resolved`, `ffi/tests.rs::concurrent_notes_edits_keep_both_and_resolve_to_plain_text`, `tests/vectors.rs::merge` (cross-checked by `check.py`) |
 
 ## What Strata does not protect against
 

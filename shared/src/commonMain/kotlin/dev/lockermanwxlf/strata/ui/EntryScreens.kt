@@ -294,7 +294,15 @@ private class FieldDraft(
     val original: String?,
     /** The field had a value (secret or not) when the editor opened. */
     val existed: Boolean,
+    /**
+     * The field holds values from two devices (spec §9.2). Like a secret field, it's
+     * "unchanged" unless the user types a replacement, so nothing is lost by saving.
+     */
+    val conflicted: Boolean = false,
 ) {
+    /** Not shown as editable text: secret, or in conflict. */
+    val opaque: Boolean get() = secret || conflicted
+
     val state = TextFieldState(original.orEmpty())
     var removed by mutableStateOf(false)
 
@@ -313,10 +321,10 @@ fun EditScreen(c: VaultController, id: String, isNew: Boolean) {
         val present = detail?.fields.orEmpty()
         STANDARD_FIELDS.forEach { (name, secret) ->
             val f = present.firstOrNull { it.name == name }
-            drafts += FieldDraft(name, f?.secret ?: secret, f?.value, existed = f != null)
+            drafts += FieldDraft(name, f?.secret ?: secret, f?.value, existed = f != null, conflicted = (f?.conflictCandidates ?: 0) > 0)
         }
         present.filter { f -> STANDARD_FIELDS.none { it.first == f.name } && !isKeePassData(f.name) }.forEach {
-            drafts += FieldDraft(it.name, it.secret, it.value, existed = true)
+            drafts += FieldDraft(it.name, it.secret, it.value, existed = true, conflicted = it.conflictCandidates > 0)
         }
         originalTags = detail?.tags.orEmpty()
         tags.edit { replace(0, length, originalTags.joinToString(", ")) }
@@ -369,13 +377,14 @@ private fun FieldEditor(draft: FieldDraft) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Column(Modifier.weight(1f)) {
             when {
-                !draft.secret -> OutlinedTextField(
+                !draft.opaque || (draft.replacing && !draft.secret) -> OutlinedTextField(
                     state = draft.state,
                     label = { Text(fieldLabel(draft.name)) },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 !draft.replacing -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${fieldLabel(draft.name)}: unchanged", modifier = Modifier.weight(1f))
+                    val what = if (draft.conflicted) "different values on two devices" else "unchanged"
+                    Text("${fieldLabel(draft.name)}: $what", modifier = Modifier.weight(1f))
                     TextButton(onClick = { draft.replacing = true }) { Text("Change") }
                 }
                 else -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -396,7 +405,7 @@ private fun edits(id: String, drafts: List<FieldDraft>, tags: TextFieldState, or
     for (d in drafts) {
         when {
             d.removed -> if (d.existed) out += EntryEdit.SetField(id, d.name, null, d.secret)
-            d.secret -> if (d.replacing && !d.state.isEmpty) out += EntryEdit.SetField(id, d.name, d.state.takeUtf8(), secret = true)
+            d.opaque -> if (d.replacing && !d.state.isEmpty) out += EntryEdit.SetField(id, d.name, d.state.takeUtf8(), d.secret)
             else -> {
                 // Non-secret values are ordinary text.
                 val text = d.state.text.toString()
@@ -420,6 +429,9 @@ fun ResolveScreen(c: VaultController, id: String, field: String) {
     DisposableEffect(Unit) { onDispose { candidates.forEach { it.value?.fill(0) } } }
     val shown = remember { mutableStateMapOf<Int, String>() }
     val typed = rememberTextFieldState()
+    // Notes can conflict too (spec §9.2): their values are plain text, shown as they are.
+    var secret by remember { mutableStateOf(true) }
+    LaunchedEffect(id, field) { secret = c.entry(id)?.fields?.firstOrNull { it.name == field }?.secret ?: true }
 
     ScreenFrame("Choose a value", onBack = { c.back() }) {
         Text("“$field” was changed on two devices at the same time. Pick the value to keep, or type a new one.")
@@ -431,22 +443,29 @@ fun ResolveScreen(c: VaultController, id: String, field: String) {
                     if (value == null) {
                         Text("Removed the field")
                     } else {
-                        Text(shown[i] ?: "••••••••", fontFamily = FontFamily.Monospace)
+                        Text(
+                            if (secret) shown[i] ?: "••••••••" else value.decodeToString(),
+                            fontFamily = if (secret) FontFamily.Monospace else FontFamily.Default,
+                        )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (value != null) {
+                        if (value != null && secret) {
                             TextButton(onClick = {
                                 if (shown.remove(i) == null) shown[i] = value.decodeToString()
                             }) { Text(if (i in shown) "Hide" else "Show") }
                         }
-                        Button(onClick = { c.resolve(id, field, value?.copyOf()) }) { Text("Keep this") }
+                        Button(onClick = { c.resolve(id, field, value?.copyOf(), secret) }) { Text("Keep this") }
                     }
                 }
             }
         }
         SectionTitle("Or a new value")
-        PasswordField(typed, field)
-        Button(enabled = !typed.isEmpty, onClick = { c.resolve(id, field, typed.takeUtf8()) }) { Text("Use this") }
+        if (secret) {
+            PasswordField(typed, field)
+        } else {
+            OutlinedTextField(state = typed, label = { Text(fieldLabel(field)) }, modifier = Modifier.fillMaxWidth())
+        }
+        Button(enabled = !typed.isEmpty, onClick = { c.resolve(id, field, typed.takeUtf8(), secret) }) { Text("Use this") }
     }
 }
 
