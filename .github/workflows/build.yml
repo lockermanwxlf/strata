@@ -127,6 +127,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, x86_64-linux-android
+      # The bindings come from a host build of the core, which links the Linux
+      # platform protectors' TPM software stack and D-Bus.
+      - run: sudo apt-get update && sudo apt-get install -y libtss2-dev libdbus-1-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core

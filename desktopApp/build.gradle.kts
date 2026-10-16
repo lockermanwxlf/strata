@@ -34,6 +34,8 @@ compose.desktop {
             }
             macOS {
                 bundleID = "dev.lockermanwxlf.strata"
+                // jpackage on macOS refuses a major version of 0. Drop this once packageVersion reaches 1.0.0.
+                packageVersion = "1.0.0"
             }
         }
     }
