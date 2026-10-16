@@ -464,7 +464,7 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
 - **Stage B:**
   - Linux TPM 2.0 (`tss-esapi`, protector 4): each slot secret is sealed under the PIN's hash, beneath a P-256 storage key the TPM re-derives from a fixed template. Wrong PINs count towards the TPM's lockout.
   - Linux Secret Service (`keyring` 3, protector 5): one app key in the desktop keyring. It counts as Strong, not rate-limited, so PIN slots are refused there.
-  - macOS Secure Enclave (`security-framework`, protector 3): ECIES to an enclave P-256 key, with the slot ID prefixed to the plaintext. It lints against `aarch64-apple-darwin`, but hasn't run on a Mac.
+  - macOS Secure Enclave (`security-framework`, protector 3): ECIES to an enclave P-256 key, with the slot ID prefixed to the plaintext. It lints against `aarch64-apple-darwin`, but hasn't run on a Mac. (Reworked 2026-10-15 to need no entitlement; see "After Phase 13".)
   - Kotlin: `StrataCore.desktopProtector()` picks the protector per OS. The TPM path asks for a PIN in the app (entered twice when turning it on).
   - Tests: `core/tools/linux-protectors.sh` starts a software TPM and a throwaway keyring, then runs clippy and the whole suite. It runs in WSL and in the Ubuntu CI job.
   - FIDO2 spike: `docs/research/fido2.md`.
@@ -596,7 +596,7 @@ One at a time, each under 200 lines with no policy logic, each reporting its `Pr
   - One claim had no direct test: that the remote learns no contents (§13). `ffi/tests.rs::the_remote_learns_no_contents_and_only_padded_sizes` now scans every vault and local-state file for entry contents, and checks that padding hides small size differences.
 - **Still manual:**
   - The Android Keystore checklist on a real device.
-  - The Secure Enclave on a Mac.
+  - ~~The Secure Enclave on a Mac.~~ Done 2026-10-15, see "After Phase 13".
   - SAF cloud providers.
   - FIDO2, which waits on a domain.
 
@@ -627,6 +627,15 @@ The vault folder was the only place a vault's contents lived, so a sync tool tha
 - **Tests** crash writes three ways (truncated, zero-filled as FAT can leave them, and whole but unacknowledged), for events and for a password change.
 
 **Done (2026-10-14): notes keep both values.** Concurrent edits to `notes` became last-writer-wins and silently lost one side. Now they are a conflict, like secret fields, but stay plain text: resolving keeps the field non-secret, and the editor treats a field in conflict as unchanged unless the user types a replacement. The merge vector has a notes conflict, so `check.py` verifies the rule independently.
+
+**Done (2026-10-15): the Secure Enclave without entitlements**, on an M4 Mac (macOS 26.5).
+
+- **Why:** the first version kept one enclave key in the data protection keychain. A keychain item needs a keychain access group entitlement, and with it a provisioning profile. A free Apple ID's profile lasts 7 days and covers only registered Macs, and anything else needs the paid developer program.
+- **Now:** each slot gets its own enclave key that is never stored, as with CryptoKit's `SecureEnclave` keys. The enclave hands back the private key sealed under its own device key (the token object, attribute `toid`, which the SDK doesn't export), and the slot's blob keeps it: `LE16 len || token object || ECIES ciphertext`. Creating a key with that token object loads the existing key instead of generating one. `delete` stays a no-op. Nothing is left in the keychain.
+- **Experiment first:** an ad-hoc signed binary with no entitlements created the key, rebuilt it in a new process (same public key), and decrypted after a Touch ID prompt. `SecKeyCreateWithData` doesn't work for this: it returns a different key. Without `kSecAttrIsPermanent = false`, the rebuild tries to add the key to the keychain and fails with -34018.
+- **Manual run** (`./gradlew :desktopApp:run`, Homebrew's unsigned JDK, no profile): a slot from the keychain version fell back to the password and was removed; then turning on Touch ID, unlocking, unlocking again after a password change (two rotations, slots now at epoch 2) with no password prompt, and cancelling the prompt all behaved as expected. Earlier the same day the keychain version also passed in a build signed with a Personal Team profile.
+- **Risk:** `toid` is undocumented. CryptoKit relies on it, but if a macOS release changes it, existing slots fail as "slot gone" and the user falls back to the password.
+- **Mac setup notes:** jpackage on macOS rejects versions that start with 0, so `packageDistributionForCurrentOS` needs a macOS `packageVersion` of at least 1.0.0. Compose refuses to package with Homebrew's JDK unless `-Pcompose.desktop.packaging.checkJdkVendor=false`.
 
 ## 4. Order and parallelism
 

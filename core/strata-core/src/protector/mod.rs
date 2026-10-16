@@ -142,8 +142,8 @@ pub fn linux_secret_service() -> Option<Arc<dyn PlatformProtector>> {
     }
 }
 
-/// The Secure Enclave (`protector_id` 3) on macOS. Needs a signed app with a keychain
-/// access group; otherwise turning it on fails with `ProtectorUnavailable`.
+/// The Secure Enclave (`protector_id` 3) on macOS. Its keys stay out of the keychain,
+/// so it needs no entitlement: any signed build can use it, ad-hoc included.
 #[uniffi::export]
 pub fn secure_enclave() -> Option<Arc<dyn PlatformProtector>> {
     #[cfg(target_os = "macos")]

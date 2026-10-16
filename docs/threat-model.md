@@ -83,7 +83,6 @@ These are the limits in spec §1, and the residual risks found in the Phase 13 a
 - **KeePass files** are only as safe as their own password. The KeePass parser (`keepass` crate) isn't fuzzed: every run would pay for a key derivation. Strata checks the file's key-derivation cost before parsing (`kdbx/header.rs`), and fuzzes that check. Once a file is decrypted, the crate decompresses its contents without a size limit, so a file the user can open could still exhaust memory. That can only be a file the user picked and holds the password to.
 - **Untested on hardware so far:**
   - Android Keystore on a real device (the emulator's keystore is software-only, and the policy correctly refuses it).
-  - The macOS Secure Enclave.
   - SAF cloud providers.
 
 ## Fuzzing
