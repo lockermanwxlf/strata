@@ -21,3 +21,5 @@ Thumbs.db
 *.vault/
 *.kdbx
 *.keyx
+# except the import fixtures, which the tests compile in (made by make.sh, fixed password)
+!core/strata-core/tests/fixtures/kdbx/*.kdbx
